@@ -1,0 +1,1001 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="my-agent daemon、三入口、请求处理流程、工具、记忆与使用说明">
+  <title>my-agent 系统说明</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18242c;
+      --muted: #60717c;
+      --paper: #f4f0e7;
+      --surface: #fffdf8;
+      --surface-2: #ebe5d9;
+      --line: #d8d0c1;
+      --teal: #0e716c;
+      --teal-soft: #dceeea;
+      --amber: #ae6c19;
+      --amber-soft: #f8e8ca;
+      --red: #a7463d;
+      --red-soft: #f5ded8;
+      --blue: #355e91;
+      --blue-soft: #e2eaf4;
+      --shadow: 0 18px 55px rgba(46, 52, 49, 0.09);
+      --radius: 18px;
+      --content: 1120px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--paper);
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 9% 3%, rgba(14, 113, 108, 0.10), transparent 24rem),
+        radial-gradient(circle at 95% 12%, rgba(174, 108, 25, 0.10), transparent 23rem),
+        var(--paper);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.7;
+    }
+
+    a { color: inherit; }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .shell {
+      width: min(calc(100% - 32px), var(--content));
+      margin: 0 auto;
+    }
+
+    .hero {
+      padding: 72px 0 46px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 18px;
+      color: var(--teal);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 26px;
+      height: 2px;
+      background: currentColor;
+      content: "";
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      max-width: 920px;
+      margin-bottom: 20px;
+      font-family: ui-serif, Georgia, "Songti SC", serif;
+      font-size: clamp(42px, 7.2vw, 82px);
+      font-weight: 650;
+      letter-spacing: -0.045em;
+      line-height: 1.05;
+    }
+
+    .lead {
+      max-width: 790px;
+      margin-bottom: 32px;
+      color: var(--muted);
+      font-size: clamp(17px, 2.2vw, 22px);
+    }
+
+    .hero-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: rgba(255, 253, 248, 0.72);
+      box-shadow: var(--shadow);
+    }
+
+    .metric {
+      min-height: 116px;
+      padding: 22px;
+      border-right: 1px solid var(--line);
+    }
+
+    .metric:last-child { border-right: 0; }
+
+    .metric strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--teal);
+      font-size: 28px;
+      line-height: 1.2;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .toc {
+      position: sticky;
+      z-index: 10;
+      top: 0;
+      border-block: 1px solid rgba(216, 208, 193, 0.9);
+      background: rgba(244, 240, 231, 0.92);
+      backdrop-filter: blur(16px);
+    }
+
+    .toc-inner {
+      display: flex;
+      gap: 26px;
+      align-items: center;
+      min-height: 56px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .toc-inner::-webkit-scrollbar { display: none; }
+
+    .toc a {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .toc a:hover { color: var(--teal); }
+
+    section {
+      padding: 72px 0;
+      scroll-margin-top: 56px;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      gap: 52px;
+      margin-bottom: 38px;
+    }
+
+    .section-index {
+      color: var(--teal);
+      font-family: ui-monospace, monospace;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+    }
+
+    h2 {
+      margin-bottom: 12px;
+      font-family: ui-serif, Georgia, "Songti SC", serif;
+      font-size: clamp(30px, 4vw, 48px);
+      font-weight: 650;
+      letter-spacing: -0.025em;
+      line-height: 1.15;
+    }
+
+    .section-copy {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .status-grid,
+    .tool-grid,
+    .memory-grid,
+    .module-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .status-grid { grid-template-columns: repeat(3, 1fr); }
+    .tool-grid { grid-template-columns: repeat(2, 1fr); }
+    .memory-grid { grid-template-columns: repeat(3, 1fr); }
+    .module-grid { grid-template-columns: repeat(2, 1fr); }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 8px 28px rgba(46, 52, 49, 0.05);
+    }
+
+    .status-card { padding: 23px; }
+
+    .status-card h3,
+    .tool-card h3,
+    .memory-card h3,
+    .module-card h3 {
+      margin-bottom: 8px;
+      font-size: 18px;
+      line-height: 1.35;
+    }
+
+    .status-card p,
+    .tool-card p,
+    .memory-card p,
+    .module-card p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-bottom: 13px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }
+
+    .done { color: var(--teal); background: var(--teal-soft); }
+    .limited { color: var(--amber); background: var(--amber-soft); }
+    .absent { color: var(--red); background: var(--red-soft); }
+
+    .flow {
+      position: relative;
+      max-width: 900px;
+      margin-left: auto;
+    }
+
+    .flow::before {
+      position: absolute;
+      top: 25px;
+      bottom: 25px;
+      left: 32px;
+      width: 2px;
+      background: linear-gradient(var(--teal), var(--amber), var(--teal));
+      content: "";
+    }
+
+    .step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 66px 1fr;
+      gap: 18px;
+      margin-bottom: 14px;
+    }
+
+    .step-no {
+      z-index: 1;
+      display: grid;
+      width: 66px;
+      height: 66px;
+      place-items: center;
+      border: 2px solid var(--teal);
+      border-radius: 50%;
+      color: var(--teal);
+      background: var(--paper);
+      font-family: ui-monospace, monospace;
+      font-size: 15px;
+      font-weight: 900;
+    }
+
+    .step-body {
+      padding: 19px 22px 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+
+    .step-body h3 {
+      margin-bottom: 5px;
+      font-size: 18px;
+    }
+
+    .step-body p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .step-body code,
+    .tool-card code,
+    .memory-card code,
+    .module-card code {
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #285c58;
+      background: #edf2ec;
+      font-size: 0.9em;
+    }
+
+    .branch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .branch > div {
+      padding: 13px 14px;
+      border-radius: 11px;
+      font-size: 14px;
+    }
+
+    .branch-text { background: var(--blue-soft); color: var(--blue); }
+    .branch-tools { background: var(--amber-soft); color: #86510f; }
+
+    .loop-note {
+      margin: 22px 0 22px 84px;
+      padding: 15px 18px;
+      border-left: 3px solid var(--amber);
+      color: #765321;
+      background: var(--amber-soft);
+      font-size: 14px;
+    }
+
+    .tool-card,
+    .memory-card,
+    .module-card {
+      padding: 24px;
+    }
+
+    .tool-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+      margin-bottom: 9px;
+    }
+
+    .tool-kind {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .params {
+      margin: 16px 0 0;
+      padding: 13px 15px;
+      border: 1px solid #e3ddd2;
+      border-radius: 10px;
+      color: #34454d;
+      background: #f7f4ed;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .memory-card {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .memory-card::after {
+      position: absolute;
+      right: -15px;
+      bottom: -30px;
+      color: rgba(14, 113, 108, 0.07);
+      font-family: ui-serif, Georgia, serif;
+      font-size: 100px;
+      font-weight: 800;
+      content: attr(data-number);
+    }
+
+    .memory-meta {
+      margin-top: 17px;
+      color: var(--teal);
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .notice {
+      margin-top: 18px;
+      padding: 20px 22px;
+      border: 1px solid #e1c99e;
+      border-radius: 14px;
+      color: #654717;
+      background: var(--amber-soft);
+    }
+
+    .notice strong { color: #744b0d; }
+
+    .safety-table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .safety-table th,
+    .safety-table td {
+      padding: 17px 18px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .safety-table tr:last-child td { border-bottom: 0; }
+
+    .safety-table th {
+      color: var(--muted);
+      background: var(--surface-2);
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .safety-table td { font-size: 14px; }
+
+    .run-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr);
+      gap: 18px;
+    }
+
+    .run-layout > * { min-width: 0; }
+
+    .terminal {
+      overflow: hidden;
+      border: 1px solid #26373a;
+      border-radius: var(--radius);
+      color: #eaf4ed;
+      background: #162426;
+      box-shadow: var(--shadow);
+    }
+
+    .terminal-bar {
+      display: flex;
+      gap: 7px;
+      padding: 13px 16px;
+      border-bottom: 1px solid #304245;
+    }
+
+    .terminal-bar i {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #506669;
+    }
+
+    .terminal pre {
+      max-width: 100%;
+      margin: 0;
+      padding: 22px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.75;
+    }
+
+    .prompt { color: #71d5bd; }
+    .comment { color: #879c9f; }
+
+    .usage-list {
+      margin: 0;
+      padding: 22px 22px 22px 42px;
+    }
+
+    .usage-list li {
+      margin-bottom: 12px;
+      overflow-wrap: anywhere;
+    }
+    .usage-list li:last-child { margin-bottom: 0; }
+
+    .module-card h3 code { font-size: 14px; }
+
+    .footer {
+      padding: 34px 0 58px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 820px) {
+      .hero { padding-top: 48px; }
+      .hero-strip { grid-template-columns: repeat(2, 1fr); }
+      .metric { border-bottom: 1px solid var(--line); }
+      .metric:nth-child(2n) { border-right: 0; }
+      .metric:last-child { grid-column: 1 / -1; border-right: 0; border-bottom: 0; }
+      .section-head { grid-template-columns: 1fr; gap: 8px; }
+      .status-grid, .memory-grid { grid-template-columns: 1fr; }
+      .run-layout { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(calc(100% - 22px), var(--content)); }
+      .hero-strip { grid-template-columns: 1fr; }
+      .metric, .metric:nth-child(2n) { border-right: 0; }
+      .metric:last-child { grid-column: auto; }
+      section { padding: 52px 0; }
+      .tool-grid, .module-grid { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 46px 1fr; gap: 11px; }
+      .flow::before { left: 22px; }
+      .step-no { width: 46px; height: 46px; font-size: 12px; }
+      .step-body { padding: 16px; }
+      .branch { grid-template-columns: 1fr; }
+      .loop-note { margin-left: 57px; }
+      .safety-table { display: block; overflow-x: auto; }
+      .usage-list code { overflow-wrap: anywhere; word-break: break-word; }
+    }
+
+    @media print {
+      :root { --paper: #fff; --surface: #fff; }
+      .toc { display: none; }
+      body { background: #fff; }
+      section { padding: 32px 0; break-inside: avoid; }
+      .panel, .terminal, .hero-strip { box-shadow: none; }
+      .flow::before { print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero shell">
+    <div class="eyebrow">Rust · Personal Coding Agent</div>
+    <h1>一个请求，如何变成一次可靠的代码行动</h1>
+    <p class="lead">
+      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。CLI、本地 HTTP API 与编辑器
+      stdio 三个瘦入口连接同一个后台运行时；请求进入后再恢复记忆、组装上下文、规划、调用工具
+      或委派子 Agent，最后把同一份事件流和可核验结果返回给调用端。
+    </p>
+    <div class="hero-strip" aria-label="系统关键指标">
+      <div class="metric"><strong>3</strong><span>个对等瘦入口</span></div>
+      <div class="metric"><strong>8</strong><span>个可调用工具</span></div>
+      <div class="metric"><strong>1</strong><span>个状态真相 daemon</span></div>
+      <div class="metric"><strong>50</strong><span>轮 ReAct 上限</span></div>
+      <div class="metric"><strong>8</strong><span>路只读并发上限</span></div>
+    </div>
+  </header>
+
+  <nav class="toc" aria-label="页面导航">
+    <div class="shell toc-inner">
+      <a href="#capabilities">能力边界</a>
+      <a href="#request-flow">请求全流程</a>
+      <a href="#tools">工具</a>
+      <a href="#advanced">进阶能力</a>
+      <a href="#memory">记忆系统</a>
+      <a href="#safety">安全与并行</a>
+      <a href="#architecture">代码架构</a>
+      <a href="#usage">如何使用</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="capabilities" class="shell">
+      <div class="section-head">
+        <div class="section-index">01 / CAPABILITIES</div>
+        <div>
+          <h2>先看清：现在能做什么</h2>
+          <p class="section-copy">以下状态以当前源码为准。“规划过”不等于“已实现”。</p>
+        </div>
+      </div>
+      <div class="status-grid">
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>Function Calling</h3>
+          <p>兼容 OpenAI Chat Completions，支持流式 SSE 和被拆成多个分片的工具参数。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>Daemon 单一真相</h3>
+          <p>会话、计划、审批、取消和运行中 turn 只由工作区 daemon 持有；入口不复制 Agent 运行时。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>三入口对等</h3>
+          <p>CLI、本地 OpenAI 兼容 HTTP/SSE、编辑器 stdio JSON-RPC 都复用同一 DaemonClient 与协议。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>三层记忆</h3>
+          <p>原始会话持久化、超限上下文压缩，以及独立的关键词 / 中文 bigram 长期记忆。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>工具安全执行</h3>
+          <p>参数校验、路径边界、灾难命令阻断、人工审批和读写分级调度。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>并行协作</h3>
+          <p>同轮只读工具最多 8 路并行；复杂调研还能派给隔离上下文、受限工具、15 轮预算的子 Agent。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>多 Agent / 子 Agent</h3>
+          <p><code>sub_agent</code> 不继承主历史、不写主 session、默认只读且不能递归，只把最终结论交回主 Agent。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>图片与 PDF</h3>
+          <p>视觉模型接收 PNG/JPEG/WebP 内容块；PDF 在本地抽取最多 50 页文字，未启用视觉时安全降级。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>计划与技能</h3>
+          <p><code>plan</code> 维护可重写任务清单；Markdown 技能库只加载与当前请求匹配的正文。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge limited">可选项未做</span>
+          <h3>cron / MCP</h3>
+          <p>蓝图将二者列为第三批可停项；当前版本尚未加入定时 turn 和外部 MCP 服务器。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="request-flow" class="shell">
+      <div class="section-head">
+        <div class="section-index">02 / REQUEST FLOW</div>
+        <div>
+          <h2>从请求进入，到回答离开</h2>
+          <p class="section-copy">这条自上而下的链路是系统主干；发生工具调用时，第 6—10 步会循环。</p>
+        </div>
+      </div>
+
+      <div class="flow">
+        <article class="step">
+          <div class="step-no">01</div>
+          <div class="step-body">
+            <h3>任一瘦入口接收请求</h3>
+            <p>请求可来自 CLI、<code>/v1/chat/completions</code> 或编辑器 stdio；入口只负责输入输出，不创建 Agent 运行时。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">02</div>
+          <div class="step-body">
+            <h3>DaemonClient 发送统一 RPC</h3>
+            <p>客户端经 Unix Domain Socket 发送 NDJSON JSON-RPC；单帧最多 4 MiB，并按 request id 多路复用事件与终态响应。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">03</div>
+          <div class="step-body">
+            <h3>Daemon 接管状态并持久化</h3>
+            <p><code>DaemonState</code> 获取无超时 RAII turn 锁，把用户消息追加到 <code>.my-agent/session.jsonl</code>，并登记可取消的活动请求。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">04</div>
+          <div class="step-body">
+            <h3>组装上下文</h3>
+            <p>顺序固定为：系统提示 → 项目根目录的 <code>AGENTS.md</code> → 对话历史 → 动态 cwd / Git / 当前计划 / 技能。工具 schema 按名称稳定排序后作为 API tools 字段发送。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">05</div>
+          <div class="step-body">
+            <h3>检查上下文预算</h3>
+            <p>默认预算 32,000 token；超过 60% 时温和摘要最老部分，超过 85% 时强力压缩并保留最近 12 条，长文本分块递归合并。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">06</div>
+          <div class="step-body">
+            <h3>流式调用模型</h3>
+            <p>Provider 请求 OpenAI 兼容的 <code>/chat/completions</code>，逐行解析 SSE；文本增量立即变成 daemon 事件，工具 name / arguments 分片则完整重组。</p>
+            <div class="branch">
+              <div class="branch-text"><strong>纯文本</strong><br>模型认为任务完成，转到第 11 步。</div>
+              <div class="branch-tools"><strong>工具调用</strong><br>进入参数、安全和执行链路。</div>
+            </div>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">07</div>
+          <div class="step-body">
+            <h3>工具查表与参数校验</h3>
+            <p><code>ToolRegistry</code> 按名称一次查表分发，并按工具 JSON Schema 校验参数。错误会作为工具结果返回给模型自行修正。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">08</div>
+          <div class="step-body">
+            <h3>安全决策与审批</h3>
+            <p>文件路径统一解析到绝对路径；工作区外读取拒绝，外部写入/编辑生成可挂起审批事件。CLI 可回答 <code>y/N</code>；无交互的 HTTP 入口安全地自动拒绝。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">09</div>
+          <div class="step-body">
+            <h3>按波次执行工具</h3>
+            <p>连续只读工具最多 8 路并行；<code>write_file</code>、<code>edit_file</code>、<code>exec</code>、<code>remember</code>、<code>plan</code>、<code>sub_agent</code> 等副作用工具逐个串行。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">10</div>
+          <div class="step-body">
+            <h3>结果严格配对并回填</h3>
+            <p>每个结果携带原始 <code>tool_call_id</code> 并落盘；图片另以仅本 turn 有效的 user 内容块发送。连续三次完全相同的调用和结果只会触发软提醒。</p>
+          </div>
+        </article>
+        <div class="loop-note"><strong>ReAct 回环：</strong>第 10 步回到第 04—06 步，最多循环 50 轮，防止意外无限调用。</div>
+        <article class="step">
+          <div class="step-no">11</div>
+          <div class="step-body">
+            <h3>保存最终回答</h3>
+            <p>模型返回纯文本后，assistant 消息先追加到 session.jsonl，再作为本 turn 的结果返回。</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-no">12</div>
+          <div class="step-body">
+            <h3>同一事件流投影到入口</h3>
+            <p>CLI 流式打印，HTTP 转成 OpenAI SSE，编辑器输出 JSON-RPC Event；最终 Response 到达后释放 turn 锁。Ctrl-C 发送取消请求，不杀 daemon。</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="tools" class="shell">
+      <div class="section-head">
+        <div class="section-index">03 / TOOLS</div>
+        <div>
+          <h2>模型可以调用的 8 个工具</h2>
+          <p class="section-copy">工具清单稳定传给模型；真正执行前仍要经过注册表、参数校验和安全策略。</p>
+        </div>
+      </div>
+      <div class="tool-grid">
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>read_file</code></h3><span class="tool-kind">只读 · 可并行</span></div>
+          <p>读取 UTF-8 文本、本地抽取 PDF；视觉模型启用时发送 PNG/JPEG/WebP 内容块。工作区外读取拒绝。</p>
+          <div class="params">{ "path": "src/main.rs" }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>exec</code></h3><span class="tool-kind">副作用 · 串行</span></div>
+          <p>通过 <code>sh -lc</code> 执行命令，返回退出码、stdout、stderr；单路输出超过 64 KiB 时截断。</p>
+          <div class="params">{ "command": "cargo test" }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>write_file</code></h3><span class="tool-kind">副作用 · 串行</span></div>
+          <p>创建或完整覆盖 UTF-8 文本文件。工作区外目标必须经用户审批。</p>
+          <div class="params">{ "path": "notes.md", "content": "..." }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>edit_file</code></h3><span class="tool-kind">副作用 · 串行</span></div>
+          <p>精确字符串替换。默认旧文本必须只出现一次；可显式设置 <code>replace_all</code>。</p>
+          <div class="params">{ "path": "src/lib.rs", "old_text": "a", "new_text": "b", "replace_all": false }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>remember</code></h3><span class="tool-kind">副作用 · 串行</span></div>
+          <p>把用户明确要求记住的偏好、约定或事实追加到长期记忆，可设置有效天数。</p>
+          <div class="params">{ "content": "用户偏好中文注释", "ttl_days": 30 }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>recall_memory</code></h3><span class="tool-kind">只读 · 可并行</span></div>
+          <p>使用英文关键词和中文相邻双字检索长期记忆，默认返回 5 条，最多 20 条。</p>
+          <div class="params">{ "query": "注释偏好", "limit": 5 }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>plan</code></h3><span class="tool-kind">副作用 · 串行</span></div>
+          <p>通过 set / update / add / show 整体重写、推进、追加或查看当前任务步骤，可选持久化。</p>
+          <div class="params">{ "action": "update", "id": "2", "status": "done" }</div>
+        </article>
+        <article class="panel tool-card">
+          <div class="tool-head"><h3><code>sub_agent</code></h3><span class="tool-kind">副作用 · 串行</span></div>
+          <p>把自洽子任务放进全新历史执行；默认工具为 read_file / exec / recall_memory，最多 15 轮。</p>
+          <div class="params">{ "task": "调研配置读取位置", "tools": ["read_file", "exec"] }</div>
+        </article>
+      </div>
+    </section>
+
+    <section id="advanced" class="shell">
+      <div class="section-head">
+        <div class="section-index">04 / ADVANCED</div>
+        <div>
+          <h2>核心进阶能力如何协作</h2>
+          <p class="section-copy">这些能力不是孤立开关，而是在一次请求的不同阶段共同控制目标、上下文、成本和执行质量。</p>
+        </div>
+      </div>
+      <div class="status-grid">
+        <article class="panel status-card">
+          <span class="badge done">目标管理</span>
+          <h3>可重写任务计划</h3>
+          <p>复杂任务先用 <code>plan set</code> 拆解步骤，执行前标记 <code>in_progress</code>，完成后标记 <code>done</code>。计划默认原子写入 <code>.my-agent/plan.json</code>，并在每轮动态上下文中可见。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">上下文隔离</span>
+          <h3>受限子 Agent</h3>
+          <p><code>sub_agent</code> 使用全新历史完成边界清晰的调研子任务，只把最终结论带回主对话。默认工具受限、最多 15 轮、不写主 session，也不能再次派生子 Agent。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">成本优化</span>
+          <h3>提示前缀缓存友好</h3>
+          <p>系统提示、按名称排序的工具 schema 和项目规则保持稳定；对话历史居中，cwd、Git、计划和技能放在末尾。日志同时识别 OpenAI 与 DeepSeek 的缓存命中字段。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">多模态</span>
+          <h3>图片与 PDF</h3>
+          <p>PNG/JPEG/WebP 以 OpenAI 兼容内容块交给视觉模型，base64 仅在当前 turn 存活。PDF 用本地解析器抽取最多 50 页文字；普通模型或不支持的格式会给出清晰降级说明。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">稳定性</span>
+          <h3>重复操作软提醒</h3>
+          <p>连续三次出现相同工具名、参数指纹和结果指纹时，下一轮提示模型换思路或收尾；不会禁用工具，也不会把合法轮询误判成硬错误。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">长对话</span>
+          <h3>两级压缩闸门</h3>
+          <p>默认 60% 水位只总结最老的一小段，85% 水位执行强力压缩并保留最近 12 条消息。原始 session 始终保持 append-only，摘要只改变内存请求视图。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">工作方法复用</span>
+          <h3>Markdown Skill 库</h3>
+          <p>从 <code>.my-agent/skills/*.md</code> 建立标题与摘要索引，用英文关键词和中文 bigram 匹配当前请求，最多加载三个命中正文，避免一次塞入整个技能库。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge limited">边界</span>
+          <h3>保持个人版克制</h3>
+          <p>cron 与 MCP 仍是后续可选项；当前没有 RBAC、向量数据库、企业连接器或操作系统级沙箱。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">运行时</span>
+          <h3>工作区 Daemon</h3>
+          <p>稳定工作区哈希隔离 socket/PID/ready/log；支持就绪探测、并发启动锁、自动拉起、stale 清理和无活动任务时的空闲退出。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">控制面</span>
+          <h3>事件、审批与取消</h3>
+          <p>文本、工具、审批、完成均带 request id；审批可由另一个 RPC 恢复，运行中 turn 只接受显式取消，绝不按挂钟超时强杀。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="memory" class="shell">
+      <div class="section-head">
+        <div class="section-index">05 / MEMORY</div>
+        <div>
+          <h2>三种“记忆”不是一回事</h2>
+          <p class="section-copy">系统把可靠恢复、控制上下文长度和跨会话偏好分成三条简单链路。</p>
+        </div>
+      </div>
+      <div class="memory-grid">
+        <article class="panel memory-card" data-number="1">
+          <span class="badge done">会话记忆</span>
+          <h3>原始消息持久化</h3>
+          <p>每条 user / assistant / tool 消息追加写入 session.jsonl。daemon 启动时自动恢复；CLI 的 <code>/new</code> 会把旧文件轮换成时间戳备份。</p>
+          <div class="memory-meta">默认：.my-agent/session.jsonl</div>
+        </article>
+        <article class="panel memory-card" data-number="2">
+          <span class="badge done">压缩记忆</span>
+          <h3>长上下文摘要</h3>
+          <p>60% 水位温和总结最老部分，85% 水位强力压缩。摘要只改变当前内存视图，原始 JSONL 仍可审计。</p>
+          <div class="memory-meta">中文约 1.5 字符 / token · 英文约 4 字符 / token</div>
+        </article>
+        <article class="panel memory-card" data-number="3">
+          <span class="badge done">长期记忆</span>
+          <h3>可召回事实与偏好</h3>
+          <p>remember 明确保存，recall_memory 按关键词、中文 bigram、手动标记和时间排序；过期条目不会返回。</p>
+          <div class="memory-meta">默认：.my-agent/memory.jsonl</div>
+        </article>
+      </div>
+      <div class="notice">
+        <strong>重要边界：</strong>长期记忆不会自动塞进每一次请求。模型需要根据工具描述主动调用
+        <code>recall_memory</code>；当前没有 embedding、向量数据库或自动语义检索。
+      </div>
+    </section>
+
+    <section id="safety" class="shell">
+      <div class="section-head">
+        <div class="section-index">06 / SAFETY</div>
+        <div>
+          <h2>软安全边界与执行顺序</h2>
+          <p class="section-copy">这是面向个人工作区的防误操作机制，不是容器、namespace 或 seccomp 级沙箱。</p>
+        </div>
+      </div>
+      <table class="safety-table">
+        <thead>
+          <tr><th>操作</th><th>策略</th><th>典型行为</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>工作区内读取</td><td><span class="badge done">直接允许</span></td><td>可进入最多 8 路的连续只读并行波次。</td></tr>
+          <tr><td>工作区外读取</td><td><span class="badge absent">拒绝</span></td><td>不弹审批，避免并行读取争抢终端输入。</td></tr>
+          <tr><td>工作区外写入 / 编辑</td><td><span class="badge limited">人工审批</span></td><td>终端显示绝对路径，默认选择为 N。</td></tr>
+          <tr><td>灾难性 shell 命令</td><td><span class="badge absent">硬阻断</span></td><td>包括根目录递归删除、mkfs、块设备覆盖、fork 炸弹等。</td></tr>
+          <tr><td>高风险但可能合理</td><td><span class="badge limited">人工审批</span></td><td>包括 kill / pkill、sudo、git reset --hard、cargo publish 等。</td></tr>
+          <tr><td>普通写工具与 exec</td><td><span class="badge done">串行执行</span></td><td>保持工具调用原始顺序，减少相互干扰。</td></tr>
+          <tr><td>非回环 HTTP 监听</td><td><span class="badge limited">Token 必需</span></td><td>必须设置 MY_AGENT_API_TOKEN；默认只监听 127.0.0.1。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="architecture" class="shell">
+      <div class="section-head">
+        <div class="section-index">07 / ARCHITECTURE</div>
+        <div>
+          <h2>单 crate，清晰模块边界</h2>
+          <p class="section-copy">仍是一个可执行 crate，但运行时收拢在 daemon，三个入口只通过统一客户端和协议访问它。</p>
+        </div>
+      </div>
+      <div class="module-grid">
+        <article class="panel module-card"><h3><code>main.rs / config.rs</code></h3><p>Clap 子命令、工作区选择、配置聚合检查与首次使用引导。</p></article>
+        <article class="panel module-card"><h3><code>daemon/</code></h3><p>DaemonState、协议 SSOT、handlers、审批、运行时装配、生命周期和 Unix socket server。</p></article>
+        <article class="panel module-card"><h3><code>client.rs</code></h3><p>持久 Unix 连接、request id 多路复用，以及测试用内存回环传输。</p></article>
+        <article class="panel module-card"><h3><code>entry/</code></h3><p>CLI REPL、本地 HTTP/SSE 和编辑器 stdio 三个瘦入口。</p></article>
+        <article class="panel module-card"><h3><code>provider.rs</code></h3><p>消息协议、Provider trait、OpenAI 兼容请求、SSE 文本和工具调用解析。</p></article>
+        <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、50 轮上限、并行波次、工具结果回填与最终终止判断。</p></article>
+        <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>
+        <article class="panel module-card"><h3><code>safety.rs</code></h3><p>所有文件路径和命令的单一安全决策点；审批由 daemon 中介挂起和恢复。</p></article>
+        <article class="panel module-card"><h3><code>session.rs</code></h3><p>append-only JSONL、残缺末行恢复、会话轮换，以及无超时的 RAII turn 锁。</p></article>
+        <article class="panel module-card"><h3><code>memory.rs</code></h3><p>长期记忆条目、有效期、关键词和中文 bigram 索引逻辑，以及两个记忆工具。</p></article>
+        <article class="panel module-card"><h3><code>plan.rs</code></h3><p>任务步骤状态、原子 JSON 持久化、动态上下文块与 plan 工具。</p></article>
+        <article class="panel module-card"><h3><code>sub_agent.rs</code></h3><p>复用 ReAct 核心，提供独立历史、工具子集、轮次预算和禁止递归的子 Agent。</p></article>
+        <article class="panel module-card"><h3><code>skills.rs</code></h3><p>Markdown 标题/摘要索引、关键词与中文 bigram 匹配，以及按需正文注入。</p></article>
+        <article class="panel module-card"><h3><code>tools/</code></h3><p>Tool trait、HashMap 注册表、参数校验，以及 read / exec / write / edit 实现。</p></article>
+      </div>
+    </section>
+
+    <section id="usage" class="shell">
+      <div class="section-head">
+        <div class="section-index">08 / USAGE</div>
+        <div>
+          <h2>构建、配置、运行</h2>
+          <p class="section-copy">API 密钥、服务地址和模型名全部从环境变量读取，不应写入源码或提交到 Git。</p>
+        </div>
+      </div>
+      <div class="run-layout">
+        <div class="terminal" aria-label="运行命令示例">
+          <div class="terminal-bar"><i></i><i></i><i></i></div>
+          <pre><span class="comment"># 1. 构建</span>
+<span class="prompt">$</span> cargo build --release
+
+<span class="comment"># 2. 配置 OpenAI 兼容服务</span>
+<span class="prompt">$</span> export OPENAI_API_KEY='你的密钥'
+<span class="prompt">$</span> export OPENAI_BASE_URL='https://api.deepseek.com'
+<span class="prompt">$</span> export MODEL_NAME='deepseek-v4-flash'
+
+<span class="comment"># 3. 可选：调整上下文</span>
+<span class="prompt">$</span> export CONTEXT_TOKEN_BUDGET='32000'
+<span class="prompt">$</span> export CONTEXT_RECENT_MESSAGES='12'
+<span class="prompt">$</span> export CONTEXT_MILD_PERCENT='60'
+<span class="prompt">$</span> export CONTEXT_STRONG_PERCENT='85'
+
+<span class="comment"># 视觉模型名含 vision 时自动启用，也可显式设置</span>
+<span class="prompt">$</span> export MULTIMODAL_ENABLED='true'
+
+<span class="comment"># 4. 检查配置并运行 CLI</span>
+<span class="prompt">$</span> ./target/release/my-agent config check
+<span class="prompt">$</span> ./target/release/my-agent
+
+<span class="comment"># 5. 其他入口</span>
+<span class="prompt">$</span> ./target/release/my-agent serve --bind 127.0.0.1:8787
+<span class="prompt">$</span> ./target/release/my-agent editor</pre>
+        </div>
+        <aside class="panel">
+          <ol class="usage-list">
+            <li>在希望 Agent 操作的项目目录中启动；该目录就是安全工作区。</li>
+            <li>CLI 会探测并自动拉起当前工作区 daemon；历史由 daemon 自动恢复。</li>
+            <li>审批出现时核对完整命令或绝对路径，再输入 <code>y</code>；回车默认拒绝。</li>
+            <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
+            <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
+            <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
+            <li>REPL 支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>；运行中按 Ctrl-C 发送显式取消。</li>
+          </ol>
+        </aside>
+      </div>
+      <div class="notice">
+        <strong>示例任务：</strong>“读取 README 并总结”“运行 cargo test，定位失败原因并修复”
+        “先规划并为项目补测试”“派子 Agent 调研配置读取位置”“读取设计截图并指出问题”
+        “把我偏好中文注释记住”。模型会根据任务选择规划、工具、子 Agent、记忆或 skill。
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="shell">my-agent 当前实现说明 · 根据本仓库源码生成 · 2026-09-08</div>
+  </footer>
+</body>
+</html>

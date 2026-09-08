@@ -1,0 +1,78 @@
+# 实施进度
+
+## 2026-09-07
+
+- 已读取完整需求与全局中文输出约束。
+- 已启用 planning-with-files 工作方式。
+- 已创建阶段计划、发现记录和进度日志。
+- 正在进行：阶段 0 项目骨架与阶段 1 ReAct 循环。
+- 已创建 Rust binary crate；首次 crates.io 拉取长时间无响应，已按用户建议切换项目级中国镜像。
+- 阶段一完成：OpenAI 兼容流式 Provider、read_file/exec、工具注册表、50 轮上限 ReAct 循环和 REPL。
+- 阶段一验证：`cargo build` 成功；`cargo test` 4/4 通过；Clippy `-D warnings` 通过。
+- 正在进行：阶段二安全、审批、参数校验与并行波次。
+- 阶段二验证：`cargo test` 10/10 通过；灾难命令、审批、宽进严出校验和只读并行均有测试覆盖；严格 Clippy 通过。
+- 阶段三完成：稳定上下文前缀、项目规则、最小动态环境、启发式 token 估算、80% 压缩闸门、分块递归摘要、图片/PDF 降级派发。
+- 阶段三验证：`cargo test` 13/13 通过；`cargo build` 与严格 Clippy 通过。
+- 正在进行：阶段四 JSONL 持久化、启动恢复与 RAII 会话锁。
+- 阶段四验证：`cargo test` 15/15 通过；JSONL 恢复与 RAII 锁有测试覆盖；`cargo build` 和严格 Clippy 通过。
+- 正在进行：阶段五 JSONL 长期记忆与关键词/中文 bigram 召回。
+- 阶段五验证：`cargo test` 17/17 通过；关键词与中文 bigram、保存与召回均有覆盖；严格 Clippy 通过。
+- 正在进行：全量代码审计、恢复健壮性、README 和最终验收。
+- 最终增强：流式工具 arguments 分片重组测试、崩溃残缺 JSONL 末行恢复、完整 README。
+- 最终验证：`cargo build --release` 成功；`cargo test --all-targets` 20/20 通过；严格 Clippy 通过；格式检查通过。
+- 配置验证：缺少 API 配置时输出清晰错误；使用占位配置时 REPL 可启动并用 `/exit` 正常退出。
+- 非测试代码审计：未发现 `unwrap()`、`expect()`、`panic!`。
+- 初次验收环境没有有效服务凭据，先由 mock Provider 覆盖 read_file 与 exec 的 ReAct 闭环；用户随后提供临时凭据并完成真实验证。
+- 2026-09-08 用户提供临时 DeepSeek 凭据后完成真实端到端验证：`deepseek-v4-flash` 先调用 `read_file` 再总结 README；随后调用 `exec` 执行文件计数并正确回答 7。session.jsonl 核对确认两个 tool_call_id 均已严格配对。凭据未写入项目文件。
+- 2026-09-08 新增 `docs/agent-system.html`：按请求进入到最终回答的顺序说明完整链路，并汇总能力状态、6 个工具、三层记忆、安全与并行、模块架构及运行方法。已在桌面和 390px 窄屏浏览器验证；页面无横向溢出、无控制台错误，且不依赖外部资源或 JavaScript。
+- 2026-09-08 启动进阶增补开发；已读取 Cargo、main.rs、provider.rs，正在完成全模块基线核对。
+- 已通读 loop_engine、context、safety、session、memory 和全部 tools；基线核对完成，开始第一批 plan 工具。
+- plan 第一轮验证：23 个测试全部通过；clippy 发现测试辅助函数 `PlanStore::in_memory` 在非测试目标中未使用，已限定为测试代码，待重跑。
+- plan 最终验证：23/23 测试、build、严格 clippy 全部通过。
+- sub_agent 完成：工具注册表改为 Arc 可共享子集；ReAct 支持无 session 的临时入口；独立历史、默认工具白名单、15 轮预算与禁止递归均有测试。25/25 测试及严格 clippy 通过。
+- 前缀缓存完成：稳定上下文顺序与工具排序有测试；兼容 OpenAI/DeepSeek 缓存 usage 日志。28/28 测试及严格 clippy 通过。
+- 图片/PDF 完成：OpenAI 兼容图片内容块、当前 turn 临时传图、非视觉降级、16 MiB 限制；lopdf 本地抽取最多 50 页。33/33 测试及严格 clippy 通过。
+- 重复检测完成：连续三次相同工具名/参数/结果后仅发建议性提醒，工具不禁用。34/34 测试及严格 clippy 通过。
+- 两级压缩完成：60% 温和、85% 强力，环境变量可调；35/35 测试及严格 clippy 通过。
+- skill 完成：标题/摘要索引、关键词/中文 bigram、最多三个命中正文；36/36 测试及严格 clippy 通过。
+- 第三批 cron/MCP 按蓝图可停边界延期；开始文档更新与进阶全量验收。
+- README 与 `docs/agent-system.html` 已同步 8 个工具、子 Agent、多模态/PDF、两级压缩、重复提醒、缓存字段与 skill；HTML 浏览器复检被本地 file URL 安全策略阻止，静态解析仅出现 xmllint 不识别 HTML5 语义标签的兼容性提示。
+- 进阶最终验收：`cargo fmt --all -- --check` 通过；`cargo build --release` 通过；`cargo test --all-targets` 36/36 通过；严格 clippy 通过且零 warning。
+- CLI 烟雾测试：缺少配置时以状态 1 清晰报告 `OPENAI_API_KEY` 缺失；占位配置可正常启动并由 `/exit` 退出。当前执行环境没有注入真实 LLM 三项环境变量，因此本轮未重复消耗用户 API 凭据做线上调用。
+- 2026-09-08 启动 daemon + 三入口架构演进；已完整读取附件和 planning-with-files 规则，创建新的阶段 A→D 计划。
+- 初步确认 main 直接组装并调用 LoopEngine，历史仍由 REPL 持有；Provider 尚未向上游流式发事件，审批仍绑定终端输入，取消与 session 列表尚不存在。继续通读剩余模块后输出正式基线清单与阶段 A 计划。
+- 完成 memory/plan/skills/sub_agent/tools 与 Cargo 依赖核对；确认这些能力可复用，阶段 A 不重写其业务逻辑。
+- 一次规划日志补丁因锚点文字与文件不完全一致而失败；重新读取文件尾部后使用准确锚点补写，未影响源码。
+- 已向用户输出正式现状确认清单与阶段 A 七步实施计划，开始协议、事件流、取消和审批内核实现。
+- Provider 已增加兼容式流事件接口，OpenAI SSE 可逐分片上送；LoopEngine 已统一输出 turn/text/tool/completed 事件，并支持显式取消。
+- 已新增 JSON-RPC 协议、4 MiB 帧限制、DaemonState、审批中介、活动请求表、五个 handler、内存 server/client；原 CLI 已改走内存回环，不再直接调用 LoopEngine。
+- 阶段 A 首轮测试 40/40 通过；仅剩已被 daemon 审批取代的 `TerminalApproval` dead_code warning，已移除后待严格复验。
+- 一次 SessionStore import 补丁因目标 import 尚不存在而失败；随后用正确上下文加入 `serde::Serialize`，未影响源码。
+- 新增取消回归测试后首次编译因测试模块漏导入 `RequestId` 失败；已补齐导入，准备重跑全套验证。
+- 阶段 A 最终验收通过：41/41 测试、build、严格 clippy、fmt check 全绿且零 warning；内存回环 CLI 已实际复用 daemon handlers。
+- 开始阶段 B：Unix socket、工作区生命周期、自动拉起与专业子命令。
+- 阶段 B 已新增稳定工作区运行路径、0700 权限、PID/ready/log/startup lock、状态探测与自动拉起雏形，并抽出 daemon 统一运行时装配函数。
+- Clap 及 Tokio net/signal 已通过项目 rsproxy 中国镜像顺利下载；44/44 测试通过，严格 Clippy 仅发现生产目标中测试专用 `JsonRpcRequest` 导入，已按 cfg(test) 收窄。
+- 阶段 B 最终验证：45/45 测试、release build、严格 clippy 和 fmt 全绿；真实 UDS 烟雾测试完成自动拉起、ready 探测、sessions、stop 与清理闭环。
+- `my-agent --help` 已显示 chat/status/stop/sessions/config；缺配置时 `config check` 一次报告三项必需变量并返回状态 1。
+- 开始阶段 C：axum 本地 API 与 OpenAI 兼容普通/流式响应。
+- Axum 已通过 rsproxy 下载；首次编译发现 SSE `unfold` 的下一状态误包了一层 `Option`，已按 Stream 状态签名修正。
+- HTTP 单测增至 47/47 全过；严格 Clippy 检出鉴权函数返回大型 Axum Response，已改为轻量 bool 判定并在 handler 统一构造错误响应。
+- HTTP 真实烟雾测试通过：`/health` 返回 ready；普通请求把上游连接错误映射为 JSON；流式请求输出错误事件后严格以 `[DONE]` 收尾；0.0.0.0 无 Token 启动被拒绝。
+- 烟雾测试暴露 daemon 子进程继承 PTY SIGINT 后留下 stale 标记，正在补独立进程组与 daemon 侧信号清理。
+- 生命周期修复完成：自动 daemon 使用独立 process group，daemon server 自身处理 Ctrl-C；复测停止 HTTP 后状态为 stopped，pid/ready/socket 全部清理，仅保留日志。
+- 阶段 C 完成：默认回环 HTTP、health、OpenAI 普通与 SSE、模型名校验、非回环 Token 门禁、HTTP 审批安全拒绝均已实现。
+- 开始可选阶段 D：stdio JSON-RPC 编辑器适配器骨架。
+- 第二轮 HTTP 烟雾测试首次选用的 18789 端口已被占用，服务清晰报错后改用 28789，验证通过；未覆盖既有监听进程。
+- 阶段 D stdio 适配器已实现并通过 NDJSON `session.list` 烟雾测试，输出保留原始 `editor-1` request_id；客户端 EOF 后 daemon 自动回到 stopped。
+- 编辑器首次烟雾测试误用了尚未重新链接的旧 debug binary，出现“不识别 editor”；执行 `cargo build` 后复测通过。
+- 已将烟雾测试产生的临时 runtime 和仅含两条“你好”的测试 session 移入 macOS 废纸篓，可恢复；未改动其他 `.my-agent` 状态。
+- 开始最终文档同步；确认 README 与 HTML 仍残留单进程/单入口旧描述，准备按当前源码统一更新。
+- README 已重写为 daemon + 三入口当前架构；HTML 已更新入口、请求链路、控制面、模块与命令说明。
+- HTML 浏览器实测：1280px 桌面无溢出、无控制台错误；390px 首测发现 usage 区横向溢出，增加 grid item min-width 与长 inline code 换行后复测 scrollWidth=390、无错误。
+- 并发审计发现全局审批出口可能被排队 chat 覆盖；已改用 Tokio task-local 请求上下文，并增加双请求路由测试，当前 48/48 测试通过。
+- 最终质量门通过：`cargo fmt --all -- --check`、`cargo build --release`、`cargo test --all-targets`（48/48）与严格 Clippy 全绿、零 warning。
+- 配置诊断复验通过：缺失三项必需变量时一次汇总并以状态 1 退出；温和阈值不小于强力阈值时给出明确关系错误。
+- 最终 stdio 实进程冒烟通过：`session.list` 保留 `editor-final` request_id、返回空会话清单，客户端断开后 daemon 自动回到 stopped。首个测试帧漏写 JSON-RPC 版本并被协议层正确拒绝，修正后通过。
+- `docs/agent-system.html` 已同步到 `/Users/pilot/Desktop/agent-system.html`；桌面版与仓库版逐字节一致。最终临时 runtime 已移入废纸篓，项目 `.my-agent` 保持为空。
+- daemon + 三入口架构演进全部完成；README、功能总览 HTML、实现与命令帮助已一致，不再残留“单进程/单入口/启动恢复询问”等旧描述。

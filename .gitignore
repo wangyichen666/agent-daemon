@@ -1,0 +1,6 @@
+/target
+.DS_Store
+.my-agent/
+.env
+.env.*
+!.env.example
