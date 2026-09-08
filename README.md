@@ -5,7 +5,7 @@
 ## 功能
 
 - OpenAI Chat Completions 兼容 Provider：解析 SSE 文本增量及分片 function calling，并记录 OpenAI/DeepSeek 缓存命中字段。
-- 全屏终端 TUI：默认命令进入 ratatui 界面，支持消息滚动、流式文本、工具状态、审批 Y/N、Ctrl-C 取消和退出后保留 daemon 任务。
+- 全屏终端 TUI：柔和深色主题、居中限宽、Markdown 标题/粗体/代码排版，工具详情默认收起；支持中文换行滚动、流式文本、独立审批面板和可见输入光标。
 - 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
 - `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
@@ -137,6 +137,8 @@ curl http://127.0.0.1:8787/health
 ```
 
 REPL 支持 `/help`、`/status`、`/sessions`、`/new`、`/cancel`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
+
+TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；PageUp/PageDown 查看历史，Ctrl+T 展开/收起工具详情，Ctrl+U 清空草稿，Ctrl+C 取消当前请求。Esc 随时退出界面，空闲时也可输入 `/exit`；退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
 
 HTTP 请求示例：
 

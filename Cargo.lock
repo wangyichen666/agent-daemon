@@ -1803,6 +1803,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
 ]
 
 [[package]]

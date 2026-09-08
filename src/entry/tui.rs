@@ -2,15 +2,14 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use serde_json::json;
 
 use crate::client::{DaemonClient, RpcStream};
@@ -20,6 +19,9 @@ use crate::entry::recovery;
 use crate::provider::{Message, Role};
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+mod view;
+use view::draw_ui;
 
 #[derive(Clone)]
 struct UiMessage {
@@ -33,8 +35,11 @@ struct TuiState {
     active: Option<RpcStream>,
     active_request_id: Option<RequestId>,
     pending_approval: Option<PendingApprovalInfo>,
+    approval_scroll: usize,
     status: String,
     scroll: usize,
+    show_tools: bool,
+    workspace: String,
 }
 
 impl TuiState {
@@ -53,6 +58,7 @@ impl TuiState {
             active: None,
             active_request_id,
             pending_approval,
+            approval_scroll: 0,
             status: if has_active {
                 "正在恢复活动请求".to_owned()
             } else if has_pending {
@@ -60,7 +66,11 @@ impl TuiState {
             } else {
                 "就绪".to_owned()
             },
-            scroll: usize::MAX,
+            scroll: 0,
+            show_tools: false,
+            workspace: std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -69,7 +79,7 @@ impl TuiState {
             role: Role::User,
             content,
         });
-        self.scroll = usize::MAX;
+        self.scroll = 0;
     }
 
     fn append_assistant(&mut self, delta: &str) {
@@ -83,13 +93,13 @@ impl TuiState {
                 content: delta.to_owned(),
             });
         }
-        self.scroll = usize::MAX;
     }
 }
 
-pub async fn run_tui(client: DaemonClient) -> Result<()> {
+pub async fn run_tui(client: DaemonClient, workspace: &std::path::Path) -> Result<()> {
     let snapshot = recovery::load_snapshot(&client).await?;
     let mut state = TuiState::from_snapshot(snapshot);
+    state.workspace = workspace.display().to_string();
     if let Some(request_id) = state.active_request_id.clone() {
         match recovery::subscribe(&client, &request_id).await {
             Ok(stream) => state.active = Some(stream),
@@ -97,6 +107,7 @@ pub async fn run_tui(client: DaemonClient) -> Result<()> {
         }
     }
 
+    let _guard = TerminalGuard;
     let mut terminal = setup_terminal()?;
     let result = run_event_loop(&client, &mut terminal, &mut state).await;
     restore_terminal(&mut terminal)?;
@@ -106,17 +117,35 @@ pub async fn run_tui(client: DaemonClient) -> Result<()> {
 fn setup_terminal() -> Result<TuiTerminal> {
     terminal::enable_raw_mode().context("启用终端 raw mode 失败")?;
     let mut stdout = io::stdout();
-    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
         let _ = terminal::disable_raw_mode();
         return Err(error).context("进入终端 alternate screen 失败");
     }
     Terminal::new(CrosstermBackend::new(stdout)).context("创建 TUI 终端失败")
 }
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+    }
+}
+
 fn restore_terminal(terminal: &mut TuiTerminal) -> Result<()> {
     terminal::disable_raw_mode().context("恢复终端 raw mode 失败")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("退出终端 alternate screen 失败")?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )
+    .context("退出终端 alternate screen 失败")?;
     terminal.show_cursor().context("恢复终端光标失败")
 }
 
@@ -125,26 +154,48 @@ async fn run_event_loop(
     terminal: &mut TuiTerminal,
     state: &mut TuiState,
 ) -> Result<()> {
+    let mut dirty = true;
     loop {
-        terminal
-            .draw(|frame| draw_ui(frame, state))
-            .context("绘制 TUI 失败")?;
+        if dirty {
+            terminal
+                .draw(|frame| draw_ui(frame, state))
+                .context("绘制 TUI 失败")?;
+            dirty = false;
+        }
 
-        if event::poll(Duration::from_millis(40)).context("读取终端事件失败")?
-            && let Event::Key(key) = event::read().context("读取键盘事件失败")?
-        {
-            handle_key(client, state, key).await?;
+        if event::poll(Duration::from_millis(16)).context("读取终端事件失败")? {
+            dirty = true;
+            match event::read().context("读取键盘事件失败")? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if let Err(error) = handle_key(client, state, key).await {
+                        state.status = format!("操作失败：{error:#}");
+                    }
+                }
+                Event::Paste(text) if state.pending_approval.is_none() => {
+                    state.input.push_str(&text.replace('\r', ""))
+                }
+                _ => {}
+            }
             if state.status == "退出" {
                 break;
             }
         }
-        if let Some(active) = state.active.as_mut() {
-            let frame = tokio::time::timeout(Duration::from_millis(1), active.next())
-                .await
-                .ok()
-                .flatten();
-            if let Some(frame) = frame {
-                handle_frame(state, frame).await?;
+        for _ in 0..128 {
+            let Some(active) = state.active.as_mut() else {
+                break;
+            };
+            match tokio::time::timeout(Duration::from_millis(1), active.next()).await {
+                Ok(Some(frame)) => {
+                    handle_frame(state, frame).await?;
+                    dirty = true;
+                }
+                Ok(None) => {
+                    state.active = None;
+                    state.status = "连接中断 · 退出后重新运行 myagent 可恢复".to_owned();
+                    dirty = true;
+                    break;
+                }
+                Err(_) => break,
             }
         }
     }
@@ -152,6 +203,37 @@ async fn run_event_loop(
 }
 
 async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) -> Result<()> {
+    if key.code == KeyCode::Esc {
+        state.status = "退出".to_owned();
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::PageUp if state.pending_approval.is_some() => {
+            state.approval_scroll = state.approval_scroll.saturating_sub(4);
+            return Ok(());
+        }
+        KeyCode::PageDown if state.pending_approval.is_some() => {
+            state.approval_scroll = state.approval_scroll.saturating_add(4);
+            return Ok(());
+        }
+        KeyCode::PageUp => {
+            state.scroll = state.scroll.saturating_add(8);
+            return Ok(());
+        }
+        KeyCode::PageDown => {
+            state.scroll = state.scroll.saturating_sub(8);
+            return Ok(());
+        }
+        _ => {}
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+        state.show_tools = !state.show_tools;
+        return Ok(());
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
+        state.input.clear();
+        return Ok(());
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         if let Some(request_id) = state.active_request_id.clone() {
             let _ = crate::entry::cli::request_result(
@@ -183,17 +265,19 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
     }
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') if state.input.is_empty() => {
-            state.status = "退出".to_owned()
-        }
-        KeyCode::PageUp => state.scroll = state.scroll.saturating_sub(8),
-        KeyCode::PageDown => state.scroll = state.scroll.saturating_add(8),
         KeyCode::Backspace => {
             state.input.pop();
         }
-        KeyCode::Char(character) => state.input.push(character),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.input.push(character)
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => state.input.push('\n'),
         KeyCode::Enter if !state.input.trim().is_empty() && state.active.is_none() => {
             let message = std::mem::take(&mut state.input);
+            if matches!(message.trim(), "/exit" | "/quit") {
+                state.status = "退出".to_owned();
+                return Ok(());
+            }
             state.push_user(message.clone());
             let stream = client
                 .request("chat.send", json!({"message": message}))
@@ -226,8 +310,17 @@ async fn handle_frame(state: &mut TuiState, frame: ServerFrame) -> Result<()> {
                     "工具完成：{}",
                     event.data["name"].as_str().unwrap_or("unknown")
                 );
+                state.messages.push(UiMessage {
+                    role: Role::Tool,
+                    content: format!(
+                        "{}\n{}",
+                        event.data["name"].as_str().unwrap_or("工具"),
+                        event.data["output"].as_str().unwrap_or_default()
+                    ),
+                });
             }
             EventKind::ApprovalRequired => {
+                state.approval_scroll = 0;
                 state.pending_approval = serde_json::from_value(event.data["approval"].clone())
                     .context("审批事件格式无效")?;
                 state.status = "等待审批：Y 允许 / N 拒绝".to_owned();
@@ -237,6 +330,7 @@ async fn handle_frame(state: &mut TuiState, frame: ServerFrame) -> Result<()> {
         ServerFrame::Response(response) => {
             state.active = None;
             state.active_request_id = None;
+            state.pending_approval = None;
             if let Some(error) = response.error {
                 state.status = format!("请求失败（{}）：{}", error.code, error.message);
             } else {
@@ -245,94 +339,6 @@ async fn handle_frame(state: &mut TuiState, frame: ServerFrame) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
-    let area = frame.area();
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " my-agent ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("· daemon TUI"),
-    ]));
-    frame.render_widget(header, layout[0]);
-
-    let lines = state
-        .messages
-        .iter()
-        .flat_map(message_lines)
-        .collect::<Vec<Line<'static>>>();
-    let visible_height = usize::from(layout[1].height.saturating_sub(2));
-    let max_scroll = lines.len().saturating_sub(visible_height);
-    let offset = if state.scroll == usize::MAX {
-        max_scroll
-    } else {
-        state.scroll.min(max_scroll)
-    };
-    let messages = Paragraph::new(Text::from(lines))
-        .block(Block::default().borders(Borders::ALL).title("对话"))
-        .wrap(Wrap { trim: false })
-        .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0));
-    frame.render_widget(messages, layout[1]);
-
-    let input_title = if let Some(approval) = &state.pending_approval {
-        format!("审批：{} [Y/N]", approval.prompt)
-    } else {
-        "输入（Enter 发送，Ctrl-C 取消，Esc 退出）".to_owned()
-    };
-    let input = Paragraph::new(state.input.as_str())
-        .block(Block::default().borders(Borders::ALL).title(input_title));
-    frame.render_widget(input, layout[2]);
-
-    let footer = List::new(vec![ListItem::new(Line::from(vec![
-        Span::styled("状态：", Style::default().fg(Color::Yellow)),
-        Span::raw(state.status.as_str()),
-    ]))]);
-    frame.render_widget(footer, layout[3]);
-}
-
-fn message_lines(message: &UiMessage) -> Vec<Line<'static>> {
-    let (label, color) = match message.role {
-        Role::User => ("你", Color::Green),
-        Role::Assistant => ("Agent", Color::Cyan),
-        Role::Tool => ("工具", Color::Yellow),
-        Role::System => ("系统", Color::Magenta),
-    };
-    let mut lines = Vec::new();
-    for (index, content) in message.content.lines().enumerate() {
-        let prefix = if index == 0 {
-            format!("[{label}] ")
-        } else {
-            "       ".to_owned()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                prefix,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(content.to_owned()),
-        ]));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("[{label}]"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
-    }
-    lines
 }
 
 fn message_to_ui(message: Message) -> Option<UiMessage> {
@@ -346,18 +352,6 @@ fn message_to_ui(message: Message) -> Option<UiMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn renders_role_prefix_and_multiline_content() {
-        let message = UiMessage {
-            role: Role::Assistant,
-            content: "第一行\n第二行".to_owned(),
-        };
-        let lines = message_lines(&message);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "[Agent] ");
-        assert_eq!(lines[1].spans[0].content, "       ");
-    }
 
     #[test]
     fn converts_persisted_message_to_ui_message() {

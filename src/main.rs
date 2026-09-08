@@ -135,7 +135,7 @@ async fn run_tui_command(workspace: &Path) -> Result<()> {
     let paths = RuntimePaths::for_workspace(workspace)?;
     paths.ensure_daemon(workspace).await?;
     let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-    run_tui(client).await
+    run_tui(client, workspace).await
 }
 
 async fn run_daemon_command(workspace: &Path) -> Result<()> {

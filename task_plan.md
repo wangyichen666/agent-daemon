@@ -128,6 +128,14 @@
 
 ## TUI 入口（2026-09-08）
 
+### TUI 视觉优化（已完成）
+
+- 显式深色背景与文字色、居中限宽、消息留白、Markdown 标题/强调/代码样式。
+- 精简工具回执、独立审批区、输入光标与粘贴、按实际换行滚动。
+- 使用 TestBackend 验证宽/窄终端和长文本，生成渲染预览；更新 release 与使用说明。
+- 验证：59 项全量测试通过；补充修正后 TUI 测试、严格 Clippy、release 再次通过。实际 PTY 验证中文草稿、Esc 退出及终端 echo/icanon 恢复。
+- 测试修正：宽字符的占位单元默认样式不代表可见字符颜色；渲染断言按可见字符检查。Swift 预览遇到系统 SDK 模块冲突，改用 Objective-C/AppKit 从 TestBackend 单元格生成 PNG。
+
 ### 目标
 
 增加类似 Claude Code 的终端交互界面，但保持 TUI 为瘦客户端：不持有 Provider、LoopEngine、session 或审批真相，只通过已有 `DaemonClient` 调用 daemon。

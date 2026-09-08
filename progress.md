@@ -90,3 +90,5 @@
 - TUI 完成：新增 `src/entry/tui.rs`，默认无子命令进入 ratatui 全屏界面；支持输入框、消息滚动、流式文本、工具状态、Y/N 审批、Ctrl-C 取消、退出时恢复终端，以及 session.load/agent.subscribe 重连恢复。
 - TUI 依赖通过项目 rsproxy 中国镜像下载：`ratatui =0.30.2`、`crossterm =0.29.0`；TUI 单元测试新增 2 项。
 - TUI 最终验收：`cargo test --all-targets`（58/58）、严格 Clippy、`cargo build --release` 和格式检查全部通过；README 与功能总览 HTML 已同步默认 TUI 用法。
+- TUI 视觉优化：新增 `entry/tui/view.rs`，显式深色主题、108 列居中阅读区、Markdown 基础样式、工具详情折叠、独立可翻页审批区。输入支持粘贴/Alt+Enter 换行/Ctrl+U，q 恢复为普通输入，Esc 随时退出；修正中文滚动并避免空闲重绘。
+- 优化验收：59 项全量测试通过，TUI 测试覆盖 110/44/24/16 列、长回答末尾和翻页；生成 TestBackend 预览并检查。真实 PTY 以隔离工作区和占位模型配置验证启动/输入/Esc/终端恢复，未调用真实 API。
