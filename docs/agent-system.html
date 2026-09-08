@@ -549,7 +549,7 @@
     <div class="eyebrow">Rust · Personal Coding Agent</div>
     <h1>一个请求，如何变成一次可靠的代码行动</h1>
     <p class="lead">
-      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。CLI、本地 HTTP API 与编辑器
+      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。CLI、本地 HTTP/ WebSocket API 与标准 ACP
       stdio 三个瘦入口连接同一个后台运行时；请求进入后再恢复记忆、组装上下文、规划、调用工具
       或委派子 Agent，最后把同一份事件流和可核验结果返回给调用端。
     </p>
@@ -598,7 +598,12 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>三入口对等</h3>
-          <p>CLI、本地 OpenAI 兼容 HTTP/SSE、编辑器 stdio JSON-RPC 都复用同一 DaemonClient 与协议。</p>
+          <p>CLI、本地 OpenAI 兼容 HTTP/SSE + 全双工 WebSocket、标准 ACP v1 stdio 都复用同一 daemon。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>断线重连恢复</h3>
+          <p>daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；CLI、ACP、WebSocket 重连后可继续消费。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -652,7 +657,7 @@
           <div class="step-no">01</div>
           <div class="step-body">
             <h3>任一瘦入口接收请求</h3>
-            <p>请求可来自 CLI、<code>/v1/chat/completions</code> 或编辑器 stdio；入口只负责输入输出，不创建 Agent 运行时。</p>
+            <p>请求可来自 CLI、<code>/v1/chat/completions</code>、<code>/ws</code> 或标准 ACP stdio；入口只负责输入输出，不创建 Agent 运行时。</p>
           </div>
         </article>
         <article class="step">
@@ -734,7 +739,7 @@
           <div class="step-no">12</div>
           <div class="step-body">
             <h3>同一事件流投影到入口</h3>
-            <p>CLI 流式打印，HTTP 转成 OpenAI SSE，编辑器输出 JSON-RPC Event；最终 Response 到达后释放 turn 锁。Ctrl-C 发送取消请求，不杀 daemon。</p>
+            <p>CLI 流式打印，HTTP 转成 OpenAI SSE，WebSocket 转发双工 JSON-RPC，ACP 输出标准 SessionNotification/Permission 请求；最终 Response 到达后释放 turn 锁。断线可通过 <code>session.load</code> + <code>agent.subscribe</code> 恢复，Ctrl-C 仅发送取消请求。</p>
           </div>
         </article>
       </div>
@@ -924,7 +929,7 @@
         <article class="panel module-card"><h3><code>main.rs / config.rs</code></h3><p>Clap 子命令、工作区选择、配置聚合检查与首次使用引导。</p></article>
         <article class="panel module-card"><h3><code>daemon/</code></h3><p>DaemonState、协议 SSOT、handlers、审批、运行时装配、生命周期和 Unix socket server。</p></article>
         <article class="panel module-card"><h3><code>client.rs</code></h3><p>持久 Unix 连接、request id 多路复用，以及测试用内存回环传输。</p></article>
-        <article class="panel module-card"><h3><code>entry/</code></h3><p>CLI REPL、本地 HTTP/SSE 和编辑器 stdio 三个瘦入口。</p></article>
+        <article class="panel module-card"><h3><code>entry/</code></h3><p>CLI REPL、本地 HTTP/SSE + WebSocket 和标准 ACP stdio 三个瘦入口；recovery helper 统一恢复逻辑。</p></article>
         <article class="panel module-card"><h3><code>provider.rs</code></h3><p>消息协议、Provider trait、OpenAI 兼容请求、SSE 文本和工具调用解析。</p></article>
         <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、50 轮上限、并行波次、工具结果回填与最终终止判断。</p></article>
         <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>

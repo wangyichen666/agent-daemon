@@ -93,3 +93,35 @@
 | 直接删除端到端验证临时文件被执行策略拒绝 | 1 | 改为移动到 macOS 废纸篓，可恢复且不再留在 `/tmp` |
 | 进阶计划首次补丁因进度文件上下文不匹配而未应用 | 1 | 先读取文件末尾，再按现有内容拆分追加 |
 | 最终 stdio 冒烟测试帧漏写 `jsonrpc` | 1 | 适配器正确返回 -32700；补齐 `jsonrpc: "2.0"` 后请求 ID、响应与空闲退出验证通过 |
+| ACP crate 首次 `cargo search/info` 被项目 source replacement 拒绝 | 1 | 按 Cargo 提示改用显式 `--registry crates-io` 查询，不重复原命令 |
+| ACP 首次编译出现 `ConnectionTo` 借用后移动 2 处及未使用导入 | 1 | `spawn` 前克隆连接供后台任务持有，并移除多余 `ConnectTo` 导入 |
+| ACP 恢复整块补丁因 fmt 后锚点变化未匹配 | 1 | 补丁未落盘；读取当前片段后拆为 import、load handler、helper 三个小补丁 |
+| Cargo 测试命令误传三个位置过滤器 | 1 | Cargo 尚未编译源码；改用单个 `--all-targets` 全量测试覆盖相关模块 |
+
+## 标准 ACP + WebSocket + 重连恢复（2026-09-08）
+
+### 目标
+
+在现有 daemon 单一真相源上，把编辑器 stdio 私有透传升级为标准 ACP server，为 axum Web 服务新增全双工 WebSocket 私有 RPC 通道，并让 CLI、ACP、WebSocket 在连接或重连后恢复未决审批，且不改变 HTTP/SSE 兼容入口。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| 0. 基线与 ACP crate 调研 | complete | RPC/事件/审批真实结构、入口行为、官方 `agent-client-protocol =2.1.0` |
+| A. 标准 ACP 入口 | complete | 官方 SDK、initialize/session 映射、typed update/permission、正式 Client 集成测试 |
+| B. WebSocket 全双工入口 | complete | `/ws`、connect 鉴权、ID 映射、RPC/Event 双向审批、HTTP/SSE 回归 |
+| C. 三入口重连恢复 | complete | daemon 可订阅事件真相、公共恢复 helper、CLI/ACP/WS pending 与 active 恢复 |
+| D. 全量验收与交付 | complete | fmt/release/test/clippy、三入口断线恢复证据、README/HTML、提交推送 |
+
+### 本轮约束
+
+- 入口只翻译协议；session、approval、cancel 与请求终态仍只由 daemon 决定。
+- 客户端断开、缺 ACK 或超时均不得自动批准、拒绝或清空 pending 状态。
+- 优先采用固定版本的活跃开源 ACP crate；若实际 API 无法满足，再依据标准规范手写并记录原因。
+- HTTP `/health`、`/v1/chat/completions` 及 SSE 保持兼容。
+
+### 阶段 C/D 验收补充
+
+- active turn 使用最多 1 MiB 回放缓存 + broadcast 实时订阅；原连接断开不再影响审批等待。
+- `agent.subscribe` 为重连入口，按当前 pending 集合过滤已解决的旧审批回放，避免 ACP 重复弹窗。
+- `session.load` 改从 append-only JSONL 读取快照，审批等待期间不会被内存历史锁阻塞。
+- CLI、标准 ACP、WebSocket 均有断线后恢复活动请求、审批与最终文本的集成测试。

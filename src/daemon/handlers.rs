@@ -1,13 +1,12 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::DaemonState;
-use super::protocol::{
-    EventFrame, EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, ServerFrame,
-};
+use super::protocol::{EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, ServerFrame};
+use super::{ActiveRequest, ActiveRequestUpdate, DaemonState};
 use crate::loop_engine::{AgentEvent, CancellationToken};
 
 const INVALID_PARAMS: i64 = -32602;
@@ -71,6 +70,7 @@ impl DaemonState {
                 };
                 send_result(&frames, request.id, result);
             }
+            "agent.subscribe" => self.handle_subscribe(request, frames).await,
             "daemon.stop" => {
                 send_result(
                     &frames,
@@ -125,13 +125,14 @@ impl DaemonState {
             );
             return;
         }
-        active.insert(request.id.clone(), cancellation.clone());
+        active.insert(request.id.clone(), ActiveRequest::new(cancellation.clone()));
         drop(active);
 
         let (agent_events, mut event_receiver) = mpsc::unbounded_channel();
+        let (approval_events, mut approval_receiver) = mpsc::unbounded_channel();
         let run = self
             .approvals
-            .with_context(request.id.clone(), frames.clone(), async {
+            .with_context(request.id.clone(), approval_events, async {
                 let mut history = self.history.lock().await;
                 self.engine
                     .run_turn_with_events(
@@ -149,16 +150,43 @@ impl DaemonState {
                 result = &mut run => break result,
                 event = event_receiver.recv() => {
                     if let Some(event) = event {
-                        send_agent_event(&frames, request.id.clone(), event);
+                        self.publish_update(
+                            &frames,
+                            &request.id,
+                            agent_event_update(event),
+                        ).await;
+                    }
+                }
+                approval = approval_receiver.recv() => {
+                    if let Some(ServerFrame::Event(event)) = approval {
+                        self.publish_update(
+                            &frames,
+                            &request.id,
+                            ActiveRequestUpdate::Event {
+                                kind: event.event,
+                                data: event.data,
+                            },
+                        ).await;
                     }
                 }
             }
         };
         while let Ok(event) = event_receiver.try_recv() {
-            send_agent_event(&frames, request.id.clone(), event);
+            self.publish_update(&frames, &request.id, agent_event_update(event))
+                .await;
+        }
+        while let Ok(ServerFrame::Event(event)) = approval_receiver.try_recv() {
+            self.publish_update(
+                &frames,
+                &request.id,
+                ActiveRequestUpdate::Event {
+                    kind: event.event,
+                    data: event.data,
+                },
+            )
+            .await;
         }
 
-        self.active.lock().await.remove(&request.id);
         let response = match result {
             Ok(content) => Ok(json!({"content": content})),
             Err(error) if error.to_string().contains("请求已取消") => {
@@ -166,11 +194,23 @@ impl DaemonState {
             }
             Err(error) => Err((INTERNAL_ERROR, format!("{error:#}"))),
         };
-        send_result(&frames, request.id, response);
+        self.publish_update(
+            &frames,
+            &request.id,
+            ActiveRequestUpdate::Terminal(response),
+        )
+        .await;
+        self.active.lock().await.remove(&request.id);
     }
 
     async fn session_load(&self) -> Result<Value, (i64, String)> {
-        let history = self.history.lock().await.clone();
+        // 活动 turn（尤其是等待人工审批时）会长期持有内存历史锁。恢复端必须仍能
+        // 立即读取快照，因此以每条消息均已 flush 的 append-only 会话文件为来源。
+        let history = self
+            .session
+            .load()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
         let approvals = self.approvals.pending().await;
         let active_requests = self
             .active
@@ -180,6 +220,7 @@ impl DaemonState {
             .cloned()
             .collect::<Vec<RequestId>>();
         Ok(json!({
+            "session_id": self.session.current_id(),
             "messages": history,
             "pending_approvals": approvals,
             "active_requests": active_requests,
@@ -205,11 +246,114 @@ impl DaemonState {
             .await
             .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
         history.clear();
-        Ok(json!({"created": true, "backup": backup}))
+        Ok(json!({
+            "created": true,
+            "session_id": self.session.current_id(),
+            "backup": backup,
+        }))
+    }
+
+    async fn handle_subscribe(
+        self: Arc<Self>,
+        request: JsonRpcRequest,
+        frames: mpsc::UnboundedSender<ServerFrame>,
+    ) {
+        let params = match parse_params::<CancelParams>(&request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                send_result(&frames, request.id, Err((INVALID_PARAMS, error)));
+                return;
+            }
+        };
+        let Some((replay, mut receiver)) = self
+            .active
+            .lock()
+            .await
+            .get(&params.request_id)
+            .map(ActiveRequest::subscribe)
+        else {
+            send_result(
+                &frames,
+                request.id,
+                Ok(json!({
+                    "subscribed": false,
+                    "request_id": params.request_id,
+                    "reason": "请求未在执行",
+                })),
+            );
+            return;
+        };
+        let pending_ids = self
+            .approvals
+            .pending()
+            .await
+            .into_iter()
+            .map(|approval| approval.id)
+            .collect::<HashSet<String>>();
+        for update in replay {
+            if is_resolved_approval(&update, &pending_ids) {
+                continue;
+            }
+            let terminal = matches!(update, ActiveRequestUpdate::Terminal(_));
+            let _ = frames.send(update.to_frame(request.id.clone()));
+            if terminal {
+                return;
+            }
+        }
+        loop {
+            match receiver.recv().await {
+                Ok(update) => {
+                    let terminal = matches!(update, ActiveRequestUpdate::Terminal(_));
+                    if frames.send(update.to_frame(request.id.clone())).is_err() || terminal {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Ok(json!({
+                            "subscribed": false,
+                            "request_id": params.request_id,
+                            "reason": "请求已结束",
+                        })),
+                    );
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((
+                            INTERNAL_ERROR,
+                            format!("订阅落后 {skipped} 个事件，请重新连接恢复"),
+                        )),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn publish_update(
+        &self,
+        frames: &mpsc::UnboundedSender<ServerFrame>,
+        request_id: &RequestId,
+        update: ActiveRequestUpdate,
+    ) {
+        if let Some(active) = self.active.lock().await.get_mut(request_id) {
+            active.publish(update.clone());
+        }
+        let _ = frames.send(update.to_frame(request_id.clone()));
     }
 
     async fn cancel(&self, request_id: &RequestId) -> Result<Value, (i64, String)> {
-        let token = self.active.lock().await.get(request_id).cloned();
+        let token = self
+            .active
+            .lock()
+            .await
+            .get(request_id)
+            .map(|active| active.cancellation.clone());
         let Some(token) = token else {
             return Ok(json!({"cancelled": false, "reason": "请求未在执行"}));
         };
@@ -235,11 +379,7 @@ fn send_result(
     let _ = frames.send(ServerFrame::Response(response));
 }
 
-fn send_agent_event(
-    frames: &mpsc::UnboundedSender<ServerFrame>,
-    request_id: RequestId,
-    event: AgentEvent,
-) {
+fn agent_event_update(event: AgentEvent) -> ActiveRequestUpdate {
     let (kind, data) = match event {
         AgentEvent::TurnStarted => (EventKind::TurnStarted, json!({})),
         AgentEvent::TextDelta(delta) => (EventKind::TextDelta, json!({"delta": delta})),
@@ -259,5 +399,18 @@ fn send_agent_event(
             (EventKind::TurnCompleted, json!({"content": content}))
         }
     };
-    let _ = frames.send(ServerFrame::Event(EventFrame::new(request_id, kind, data)));
+    ActiveRequestUpdate::Event { kind, data }
+}
+
+fn is_resolved_approval(update: &ActiveRequestUpdate, pending_ids: &HashSet<String>) -> bool {
+    let ActiveRequestUpdate::Event {
+        kind: EventKind::ApprovalRequired,
+        data,
+    } = update
+    else {
+        return false;
+    };
+    data["approval"]["id"]
+        .as_str()
+        .is_some_and(|id| !pending_ids.contains(id))
 }

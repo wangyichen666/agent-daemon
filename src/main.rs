@@ -21,8 +21,8 @@ use clap::{Parser, Subcommand};
 use daemon::lifecycle::{DaemonStatus, RuntimePaths};
 use daemon::runtime::build_daemon_state;
 use daemon::server::run_unix_server;
-use entry::cli::{print_sessions, request_result, run_chat, run_repl};
-use entry::editor::run_stdio_adapter;
+use entry::cli::{print_sessions, recover_connection, request_result, run_chat, run_repl};
+use entry::editor::run_acp_server;
 use entry::serve::run_http_server;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
@@ -95,7 +95,7 @@ async fn run_editor_command(workspace: &Path) -> Result<()> {
     let paths = RuntimePaths::for_workspace(workspace)?;
     paths.ensure_daemon(workspace).await?;
     let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-    run_stdio_adapter(client).await
+    run_acp_server(client, workspace.to_path_buf()).await
 }
 
 async fn run_serve_command(workspace: &Path, bind: SocketAddr) -> Result<()> {
@@ -118,6 +118,7 @@ async fn run_chat_command(workspace: &Path, prompt: Vec<String>) -> Result<()> {
     let paths = RuntimePaths::for_workspace(workspace)?;
     paths.ensure_daemon(workspace).await?;
     let client = client::DaemonClient::connect_unix(&paths.socket).await?;
+    recover_connection(&client).await?;
     if prompt.is_empty() {
         run_repl(&client).await
     } else {

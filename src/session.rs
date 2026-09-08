@@ -55,6 +55,14 @@ impl SessionStore {
         }
     }
 
+    pub fn current_id(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session.jsonl")
+            .to_owned()
+    }
+
     pub async fn lock_turn(&self) -> MutexGuard<'_, ()> {
         self.turn_lock.lock().await
     }

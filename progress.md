@@ -76,3 +76,14 @@
 - 最终 stdio 实进程冒烟通过：`session.list` 保留 `editor-final` request_id、返回空会话清单，客户端断开后 daemon 自动回到 stopped。首个测试帧漏写 JSON-RPC 版本并被协议层正确拒绝，修正后通过。
 - `docs/agent-system.html` 已同步到 `/Users/pilot/Desktop/agent-system.html`；桌面版与仓库版逐字节一致。最终临时 runtime 已移入废纸篓，项目 `.my-agent` 保持为空。
 - daemon + 三入口架构演进全部完成；README、功能总览 HTML、实现与命令帮助已一致，不再残留“单进程/单入口/启动恢复询问”等旧描述。
+- 2026-09-08 启动“标准 ACP + WebSocket + 重连恢复”演进；已读取完整附件与 planning-with-files 规则，先做阶段 0 真实代码核对和 ACP crate 调研，尚未修改业务源码。
+- 阶段 0 完成并已向用户输出清单：确认 7 个 daemon RPC、6 类 Event、审批真实字段、axum/CLI/editor 基线；选定官方 `agent-client-protocol =2.1.0` 稳定 v1，开始阶段 A。
+- 阶段 A 依赖地基完成：`agent-client-protocol =2.1.0` 已通过 rsproxy 下载并锁定，项目 MSRV 调整为 1.88；未接入代码时 `cargo check` 通过。
+- 阶段 A 完成：编辑器命令已变为标准 ACP v1 server；initialize/new/load/prompt/cancel、文本/工具 update 与 request_permission 均映射到 daemon。官方 ACP Client 集成测试覆盖 allow_once 后继续执行；51/51 测试、build、fmt、严格 Clippy 全绿。
+- 开始阶段 B：在保留 `/health` 与 `/v1/chat/completions` 的前提下新增 `/ws` 全双工私有 RPC 通道。
+- 阶段 B 完成：axum 新增 `/ws`，首帧 connect 复用 Token 规则，请求 ID 在连接边界映射；真实 TCP 测试覆盖错误 Token、chat Event、审批回填与继续执行。52/52 测试、build、fmt、严格 Clippy 全绿。
+- 开始阶段 C：先把 active 事件与审批等待从原连接解耦，新增 daemon 订阅语义，再接入 CLI/ACP/WS 自动恢复。
+- daemon active truth 已升级为有界回放+broadcast，并新增 `agent.subscribe`；`chat.send` 的审批事件先进入 daemon 内部通道，再投影到连接，原连接发送失败不再终止审批等待。
+- 阶段 C 完成：`session.load` 在审批等待时改走已 flush 的 JSONL 快照，避免 history 锁阻塞恢复；CLI、标准 ACP、WebSocket 均完成断线后恢复活动请求、审批与最终文本的集成测试。
+- ACP 订阅会跳过已由 `session/load` 处理的旧审批，防止重复权限请求；WebSocket 重连以 daemon active request id 作为恢复事件标识。
+- 阶段 C/D 最终验收：`cargo fmt --all -- --check`、`cargo test --all-targets`（56/56）、严格 Clippy（`-D warnings`）与 `cargo build --release` 全部通过。

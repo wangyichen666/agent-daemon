@@ -76,3 +76,38 @@
 - 最终形态由一个按工作区隔离、按需自动拉起的 daemon 持有全部运行时真相；CLI、HTTP 与 stdio 编辑器入口都只使用 `DaemonClient` 和统一 JSON-RPC 协议。
 - 并发审批必须使用 task-local 请求上下文；全局可变“当前事件出口”会让排队请求覆盖正在等待的审批路由。对应双请求回归测试已固定该约束。
 - 最终 48 项测试、release、fmt 与严格 Clippy 全绿；隔离 stdio 实进程测试确认协议响应和 daemon 空闲退出，HTTP/UDS 生命周期测试也已覆盖。
+
+## 标准 ACP + WebSocket + 重连恢复：阶段 0 发现
+
+- daemon 私有 RPC 真实方法为 `chat.send`、`session.load`、`session.list`、`session.new`、`approval.respond`、`agent.cancel`、`daemon.stop`。
+- `chat.send` 参数是 `{message: String}`；`approval.respond` 是 `{approval_id: String, approved: bool}`；`agent.cancel` 是 `{request_id: RequestId}`。后两者当前没有“作用域”字段，审批只有本次允许/拒绝。
+- `session.load` 返回 `{messages, pending_approvals, active_requests}`；pending 项实际结构为 `{id, request_id, prompt}`，没有拆分后的动作名、命令或选项字段；active request 是字符串或数字 request id 数组。
+- daemon EventKind 实际为 `turn_started`、`text_delta`、`tool_started`、`tool_finished`、`approval_required`、`turn_completed`。工具事件含 call id/name，结束事件另含 output；审批事件 data 为 `{approval: PendingApprovalInfo}`。
+- 当前 `ApprovalBroker::request` 在审批事件接收端断开时会删除 pending 并返回错误；这与本轮“连接断开不能决定业务终态”的硬约束冲突，阶段 C 前必须将审批 truth 与单连接事件发送解耦。
+- 编辑器入口 `run_stdio_adapter` 确认是纯私有 JSON-RPC 透传：解析项目自己的 `JsonRpcRequest`，把 method/params 原样交给 `DaemonClient`，并把 `ServerFrame` 原样写 stdout；没有 ACP initialize/session 方法或 server notification/request。
+- Web 入口确实是 axum 0.8，现有路由仅 `/health` 与 `/v1/chat/completions`；鉴权落在 `is_authorized(HeaderMap, Option<&str>)`，HTTP/SSE 遇到审批会安全地自动拒绝。
+- CLI 连接后不会自动 `session.load`；`/status` 只显示 history/active/pending 数量，审批交互仅发生在当前 `chat.send` 流收到 `approval_required` 时。
+- `DaemonClient` 在单条 Unix 连接上按 request id 多路复用，但只把 Event 发给“发起该 request id 的本连接 pending channel”；新连接无法订阅既有 active request。要满足重连继续收流，需要 daemon 侧持久的请求事件广播/重放机制和一个订阅 RPC，而不能由入口伪造。
+- `serve_unix_connection` 为每个连接创建独立 frame sender；客户端 EOF 后该 sender 最终关闭。当前 `chat.send` 与连接 sender 生命周期耦合，进一步确认断线恢复需要解耦请求执行与连接输出。
+- WebSocket 可直接基于现有 axum 增加 `ws` feature 与 `WebSocketUpgrade`；握手后仍可复用 `DaemonClient::request_with_id`，但需并发读写以允许审批/cancel 与长 chat 同时进行。
+- ACP 官方组织明确提供 Rust 实现 `agent-client-protocol`，当前稳定 wire protocol 为 v1；官方仓库包含 agent/client 示例。搜索结果显示旧单仓库曾发布 0.13.x，而官方项目后来又拆出 `rust-sdk`，因此必须以 crates.io 当前元数据和实际下载源码为准选定固定版本，不能仅凭搜索摘要猜版本。
+- 项目把 crates.io 替换为 rsproxy sparse，首次裸跑 `cargo search/info` 被 Cargo 拒绝并提示指定 `--registry crates-io`；下一次查询使用该明确修正。
+- crates.io 当前正式 crate 是 `agent-client-protocol 2.1.0`（Apache-2.0、官方 `agentclientprotocol/rust-sdk`），但 MSRV 为 Rust 1.88；项目当前声明 Rust 1.85，当前机器编译器为 1.98.1。采用 2.1.0 就必须明确把项目 rust-version 提升到至少 1.88，或调研是否有仍可获取且满足协议能力的 1.x 版本。
+- `agent-client-protocol 2.0.0` 同样要求 Rust 1.88；搜索摘要中的旧 0.13.3 已无法通过当前 crates.io 索引获取，不能作为可靠选项。
+- 已确认官方 2.1.0 是完整 SDK 而非只有 schema：导出 `Agent`/`Client` role、`Builder`、`ConnectionTo`、`Stdio`、`Lines`、typed request/notification、session helper 与权限请求能力；默认使用稳定 ACP v1，草案 v2 需显式 feature，本项目不应开启不稳定 v2。
+- 官方 2.1.0 README 明确提供 `simple_agent` 示例并把 stdio/连接构建纳入 crate；因此选择官方 crate 路径优于手写 ACP 帧。项目可把 `rust-version` 从 1.85 提升到 1.88（当前工具链 1.98.1），并精确 pin `=2.1.0`。
+- 已从下载后的 crate 源码核对：标准 agent 入口形态是 `Agent.builder().on_receive_request(...).connect_to(Stdio::new())`，不需要 `tokio_util::compat`；crate 自带 stdio 传输。
+- SDK 的稳定 v1 session helper会在 `session/new` 后动态安装 session 消息 handler；`PromptRequest` 对应终态 `PromptResponse`，流式内容经 `SessionNotification`/`SessionUpdate::AgentMessageChunk` 主动发送。权限往返有 typed `RequestPermissionRequest/Response`，可直接实现标准方法而非私有帧。
+- ACP v1 schema 的必要映射已核对：`NewSessionRequest` 要求绝对 cwd，`NewSessionResponse` 要求 SessionId；`LoadSessionRequest` 含 sessionId/cwd；`CancelNotification` 只带 sessionId；`RequestPermissionRequest` 必须关联一个 `ToolCallUpdate` 并给出 options；稳定选项种类包含 allow_once/allow_always/reject_once/reject_always。本项目 daemon 仅支持一次性 bool，故只广告 allow_once 与 reject_once，不能伪装持久授权。
+- ACP 稳定 `SessionUpdate` 原生支持 agent message chunk、tool call、tool call update 和 plan；本项目当前事件没有独立 plan 事件，若未来出现无对应事件才降级文本，本轮不伪造 plan update。
+- ACP request handler 会阻塞同连接后续入站分发；`session/prompt` 和 `session/load` 若在 handler 内直接等待 daemon/权限响应会死锁。正确模式是用 connection context `spawn` 后台任务并立即返回，让 responder 在任务终态响应。
+- `ConnectionTo` 原生支持 typed `send_notification`、`send_request`；权限请求可在后台任务中无超时等待 client response。工具状态可准确映射为 Pending/InProgress/Completed/Failed。
+- ACP prompt 的基线内容要求 Text 与 ResourceLink；本适配器会把文本直接拼接，把 ResourceLink 以名称+URI 注入文本，不广告尚未完成入站转换的 image/audio/embeddedContext 能力。
+- SDK 的 `ConnectionTo::spawn` 任务生命周期与 ACP 连接绑定，适合让 prompt handler 立即返回而后台消费 daemon 流；真正跨 ACP 进程断线继续执行仍依赖阶段 C 的 daemon 事件订阅，而不是依赖该 task 存活。
+- 官方 SDK 支持 `Channel::duplex()` 与 `Client.builder().connect_with(agent, ...)`，因此阶段 A 集成测试可全程进程内使用正式 ACP client/server 两侧和 mock daemon，无需依赖真实密钥或脆弱的手写 JSON。
+- 危险审批集成测试可注册一个测试工具，通过真实 `ApprovalBroker` 请求授权；mock Provider 先返回该工具调用、再返回文本，由 ACP Client 的 typed `RequestPermissionRequest` handler 选择 allow_once，完整覆盖通知、权限往返和继续执行。
+- ACP 适配器已按 SDK 推荐结构拆成可测试的 `build_acp_agent` 组件；正式入口连接 `Stdio`，单元集成测试可让官方 Client 直接 `connect_with` 该组件。
+- daemon 重连采用新增私有 RPC `agent.subscribe {request_id}`：active turn 在 daemon 内维护取消令牌、最多 1 MiB 事件回放与 broadcast 实时流；订阅 RPC 把回放/实时事件改绑到订阅请求 ID，因此能被新 `DaemonClient` 正确路由。
+- 已解决审批重放重复响应问题：订阅时按 `ApprovalBroker` 当前 pending 集合过滤已经被明确处理的旧 `approval_required` 回放；新产生的审批事件仍实时投影。
+- 阶段 C 新发现：`chat.send` 在 `LoopEngine` 完成前持有 daemon history Mutex；若模型等待审批，重连端的 `session.load` 会被永久阻塞。恢复快照现从 append-only session JSONL 读取（每条消息 append 后 flush），并保留内存历史供活动 turn 使用。
+- WebSocket 重连时原外部 request id 映射可能不存在，恢复事件使用 daemon active request id；客户端应以 recovery snapshot 中的 active request id 订阅/取消，测试已覆盖该语义。

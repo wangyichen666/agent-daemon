@@ -185,7 +185,7 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::context::{ContextConfig, ContextManager};
@@ -194,8 +194,9 @@ mod tests {
     use crate::loop_engine::LoopEngine;
     use crate::plan::PlanStore;
     use crate::provider::{Message, Provider, Response, ToolSpec};
+    use crate::safety::Approval;
     use crate::session::SessionStore;
-    use crate::tools::ToolRegistry;
+    use crate::tools::{Tool, ToolRegistry};
 
     static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
 
@@ -204,6 +205,33 @@ mod tests {
     }
 
     struct PendingProvider;
+
+    struct ApprovalTool {
+        approvals: ApprovalBroker,
+    }
+
+    #[async_trait]
+    impl Tool for ApprovalTool {
+        fn name(&self) -> &str {
+            "danger"
+        }
+
+        fn description(&self) -> &str {
+            "测试断线审批恢复"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: Value) -> Result<String> {
+            if self.approvals.request("执行断线恢复测试动作").await? {
+                Ok("approved".to_owned())
+            } else {
+                anyhow::bail!("测试动作被拒绝")
+            }
+        }
+    }
 
     #[async_trait]
     impl Provider for MockProvider {
@@ -393,5 +421,123 @@ mod tests {
 
         let _ = std::fs::remove_file(session_path);
         let _ = std::fs::remove_dir_all(runtime_directory);
+    }
+
+    #[tokio::test]
+    async fn dropped_stream_can_resubscribe_and_resolve_pending_approval() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let session_path = std::env::temp_dir().join(format!(
+            "my-agent-reconnect-{}-{id}.jsonl",
+            std::process::id()
+        ));
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from([
+                Response::ToolCalls(vec![crate::provider::ToolCall {
+                    id: "reconnect-danger".to_owned(),
+                    name: "danger".to_owned(),
+                    arguments: json!({}),
+                }]),
+                Response::Text("恢复后完成".to_owned()),
+            ])),
+        });
+        let approvals = ApprovalBroker::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(ApprovalTool {
+            approvals: approvals.clone(),
+        });
+        let session = Arc::new(SessionStore::new(&session_path));
+        let context = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 1_000_000,
+                recent_messages: 100,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100_000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        let engine = Arc::new(LoopEngine::new(provider, tools, context, session.clone()));
+        let state = Arc::new(DaemonState::new(engine, Vec::new(), session, approvals));
+        let client = InMemoryServer::start(state);
+        let original_id = RequestId::String("lost-client-turn".to_owned());
+        let mut original = client
+            .request_with_id(
+                original_id.clone(),
+                "chat.send",
+                json!({"message": "执行恢复测试"}),
+            )
+            .await
+            .unwrap();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(2), original.next())
+                .await
+                .expect("等待原连接审批事件超时")
+                .expect("原连接在审批事件前关闭");
+            if matches!(
+                frame,
+                ServerFrame::Event(ref event) if event.event == EventKind::ApprovalRequired
+            ) {
+                break;
+            }
+        }
+        drop(original);
+
+        let mut load = client.request("session.load", json!({})).await.unwrap();
+        let ServerFrame::Response(load) = tokio::time::timeout(Duration::from_secs(2), load.next())
+            .await
+            .expect("等待恢复快照超时")
+            .expect("恢复快照流提前关闭")
+        else {
+            panic!("预期恢复快照响应");
+        };
+        let snapshot = load.result.unwrap();
+        assert_eq!(snapshot["pending_approvals"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["active_requests"][0], json!(original_id));
+        let approval_id = snapshot["pending_approvals"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut subscription = client
+            .request("agent.subscribe", json!({"request_id": original_id}))
+            .await
+            .unwrap();
+        let mut approval_response = client
+            .request(
+                "approval.respond",
+                json!({"approval_id": approval_id, "approved": true}),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), approval_response.next())
+                .await
+                .expect("等待审批响应超时")
+                .expect("审批响应流提前关闭"),
+            ServerFrame::Response(JsonRpcResponse { error: None, .. })
+        ));
+
+        let mut saw_text = false;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), subscription.next())
+                .await
+                .expect("等待恢复订阅事件超时")
+                .expect("恢复订阅流提前关闭")
+            {
+                ServerFrame::Event(event) if event.event == EventKind::TextDelta => {
+                    saw_text |= event.data["delta"] == "恢复后完成";
+                }
+                ServerFrame::Response(response) => {
+                    assert!(response.error.is_none());
+                    break;
+                }
+                ServerFrame::Event(_) => {}
+            }
+        }
+        assert!(saw_text);
+        let _ = std::fs::remove_file(session_path);
     }
 }

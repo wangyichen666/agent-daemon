@@ -14,14 +14,16 @@
 - 同轮连续只读工具最多 8 路并行，副作用工具串行；连续三次完全相同的工具调用与结果只做软提醒。
 - 显式按 request id 取消；不使用挂钟超时强杀正在执行的 turn。
 - daemon 使用工作区稳定哈希隔离 socket/PID/ready/log；启动探测、并发启动锁、失效标记清理和最后客户端断开后的空闲退出均已实现。
-- 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；非回环监听必须配置 Bearer Token。
+- 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；同一服务的 `/ws` 提供全双工 JSON-RPC、事件流和交互审批；非回环监听必须配置 Bearer Token。
+- 编辑器入口实现标准 ACP v1（`agent-client-protocol`），支持 initialize、session/new/load、prompt、cancel、工具更新和 typed 权限请求。
+- 连接断开后可恢复：daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；CLI、ACP `session/load`、WebSocket 重连均可继续消费，不会因断线自动批准或拒绝。
 
 cron 和 MCP 仍是未实现的可选扩展。本项目也不提供多租户、RBAC、容器沙箱、向量数据库或企业连接器。
 
 ## 请求链路
 
 ```text
-CLI / HTTP / 编辑器 stdio
+CLI / HTTP+WebSocket / 标准 ACP stdio
           │
           ▼
      DaemonClient
@@ -50,15 +52,16 @@ src/client.rs              内存/Unix DaemonClient、request_id 多路复用
 src/daemon/
   mod.rs                   DaemonState：运行时状态唯一真相
   protocol.rs              JSON-RPC 请求/响应/事件帧 SSOT，4 MiB 上限
-  handlers.rs              chat/session/approval/cancel/stop 方法
+  handlers.rs              chat/session/approval/cancel/subscribe/stop 方法
   approval.rs              可挂起、可重连查看的审批中介
   runtime.rs               Provider、工具、上下文、会话统一装配
   lifecycle.rs             工作区运行目录、PID/ready、探测与自动拉起
   server.rs                内存回环与 Unix socket server
 src/entry/
-  cli.rs                   REPL、流式显示、slash 命令、Ctrl-C 取消
-  serve.rs                 health 与 OpenAI 兼容 HTTP/SSE
-  editor.rs                stdio JSON-RPC 薄适配器
+  cli.rs                   REPL、恢复活动请求、流式显示、slash 命令、Ctrl-C 取消
+  serve.rs                 health、OpenAI 兼容 HTTP/SSE 与全双工 WebSocket
+  editor.rs                标准 ACP v1 stdio server、恢复与权限请求
+src/entry/recovery.rs      三入口共享的 session.load、approval、active subscribe helper
 src/provider.rs            Provider trait、OpenAI 兼容请求与 SSE
 src/loop_engine.rs         ReAct、事件、取消、工具波次与结果回填
 src/context.rs             上下文排序、环境、Skill、估算与压缩
@@ -73,7 +76,7 @@ src/tools/                 Tool trait、注册表与文件/命令工具
 
 ## 构建与配置
 
-需要 Rust 1.85 或更高版本。目前进程间传输使用 Unix Domain Socket，支持 macOS/Linux；Windows Named Pipe 留作后续适配。
+需要 Rust 1.88 或更高版本（标准 ACP SDK 的 MSRV）。目前进程间传输使用 Unix Domain Socket，支持 macOS/Linux；Windows Named Pipe 留作后续适配。
 
 ```bash
 cargo build --release
@@ -121,8 +124,10 @@ export MODEL_NAME='你的模型名'
 # 本地 OpenAI 兼容 API
 ./target/release/my-agent serve --bind 127.0.0.1:8787
 curl http://127.0.0.1:8787/health
+# 全双工 WebSocket（首帧发送 {"type":"connect","token":"..."}）
+# ws://127.0.0.1:8787/ws
 
-# 编辑器 stdio JSON-RPC 适配器
+# 编辑器标准 ACP v1 stdio server
 ./target/release/my-agent editor
 ```
 

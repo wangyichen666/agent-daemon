@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -16,7 +16,7 @@ tokio::task_local! {
     static ACTIVE_APPROVAL_CONTEXT: ApprovalContext;
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PendingApprovalInfo {
     pub id: String,
     pub request_id: RequestId,
