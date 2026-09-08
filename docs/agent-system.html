@@ -854,7 +854,17 @@
         <article class="panel status-card">
           <span class="badge done">控制面</span>
           <h3>事件、审批与取消</h3>
-          <p>文本、工具、审批、完成均带 request id；审批可由另一个 RPC 恢复，运行中 turn 只接受显式取消，绝不按挂钟超时强杀。</p>
+          <p>文本、工具、审批、完成均带 request id；daemon 用最多 1 MiB 回放缓存 + broadcast 保存活动输出。审批可由另一个连接恢复，断线不会自动批准、拒绝或强杀 turn。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">编辑器协议</span>
+          <h3>标准 ACP v1</h3>
+          <p><code>editor</code> 入口使用官方 Rust SDK，支持 initialize、session/new/load、prompt、cancel、SessionNotification 和 typed <code>request_permission</code>。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">实时接入</span>
+          <h3>WebSocket 全双工</h3>
+          <p><code>/ws</code> 首帧完成 connect 鉴权，之后可同时发送 chat、approval.respond、agent.cancel 并接收事件；重连后用 recovery snapshot + active request id 继续消费。</p>
         </article>
       </div>
     </section>
@@ -971,6 +981,9 @@
 <span class="comment"># 视觉模型名含 vision 时自动启用，也可显式设置</span>
 <span class="prompt">$</span> export MULTIMODAL_ENABLED='true'
 
+<span class="comment"># 非回环 HTTP 或 WebSocket 时设置访问令牌</span>
+<span class="prompt">$</span> export MY_AGENT_API_TOKEN='本地访问令牌'
+
 <span class="comment"># 4. 检查配置并运行 CLI</span>
 <span class="prompt">$</span> ./target/release/my-agent config check
 <span class="prompt">$</span> ./target/release/my-agent
@@ -988,6 +1001,8 @@
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
             <li>REPL 支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>；运行中按 Ctrl-C 发送显式取消。</li>
+            <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
+            <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
           </ol>
         </aside>
       </div>
@@ -995,6 +1010,9 @@
         <strong>示例任务：</strong>“读取 README 并总结”“运行 cargo test，定位失败原因并修复”
         “先规划并为项目补测试”“派子 Agent 调研配置读取位置”“读取设计截图并指出问题”
         “把我偏好中文注释记住”。模型会根据任务选择规划、工具、子 Agent、记忆或 skill。
+      </div>
+      <div class="notice">
+        <strong>断线恢复顺序：</strong>重新连接同一工作区 daemon → 调用 <code>session.load</code> 获取历史、待审批和活动 request id → 对每个活动 request 调用 <code>agent.subscribe</code> → 继续处理审批事件，直到收到终态 Response。连接断开本身不会改变任务结果。
       </div>
     </section>
   </main>
