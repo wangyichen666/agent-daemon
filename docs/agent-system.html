@@ -603,7 +603,7 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>全屏终端 TUI</h3>
-          <p>直接运行 <code>myagent</code> 进入柔和深色界面：居中限宽、Markdown 标题/粗体/代码排版、工具详情默认收起，支持中文滚动、流式输出和独立 Y/N 审批面板。</p>
+          <p>直接运行 <code>myagent</code> 进入全屏界面：默认继承终端前景与背景，兼容浅色、深色和自定义主题；也可显式启用真彩深色主题。界面居中限宽，支持 Markdown 排版、工具折叠、中文滚动、流式输出和独立 Y/N 审批面板。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -993,6 +993,9 @@
 <span class="prompt">$</span> ./target/release/my-agent config check
 <span class="prompt">$</span> ./target/release/my-agent
 
+<span class="comment"># 可选：仅在终端支持 truecolor 时启用内置深色主题</span>
+<span class="prompt">$</span> MY_AGENT_TUI_THEME=dark myagent
+
 <span class="comment"># 5. 普通 REPL、HTTP/WebSocket、标准 ACP</span>
 <span class="prompt">$</span> ./target/release/my-agent chat
 <span class="prompt">$</span> ./target/release/my-agent serve --bind 127.0.0.1:8787
@@ -1006,7 +1009,7 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>TUI 按 Enter 发送、Alt+Enter 换行，支持多行粘贴；<code>PageUp/PageDown</code> 滚动，Ctrl+T 展开工具详情，Ctrl+U 清空草稿，Ctrl-C 取消当前 turn，Esc 退出。字母 <code>q</code> 可正常输入。</li>
+            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark myagent</code> 启用内置深色主题。Enter 发送、Alt+Enter 换行，支持多行粘贴；<code>PageUp/PageDown</code> 滚动，Ctrl+T 展开工具详情，Ctrl+U 清空草稿，Ctrl-C 取消当前 turn，Esc 退出。</li>
             <li>普通 REPL 支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>；运行中按 Ctrl-C 发送显式取消。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>

@@ -29,6 +29,28 @@ struct UiMessage {
     content: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TuiThemeMode {
+    Terminal,
+    Dark,
+}
+
+impl TuiThemeMode {
+    fn from_env() -> Self {
+        match std::env::var("MY_AGENT_TUI_THEME") {
+            Ok(value)
+                if matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "dark" | "truecolor"
+                ) =>
+            {
+                Self::Dark
+            }
+            _ => Self::Terminal,
+        }
+    }
+}
+
 struct TuiState {
     messages: Vec<UiMessage>,
     input: String,
@@ -40,6 +62,7 @@ struct TuiState {
     scroll: usize,
     show_tools: bool,
     workspace: String,
+    theme_mode: TuiThemeMode,
 }
 
 impl TuiState {
@@ -71,6 +94,7 @@ impl TuiState {
             workspace: std::env::current_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
+            theme_mode: TuiThemeMode::from_env(),
         }
     }
 

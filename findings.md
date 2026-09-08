@@ -114,3 +114,4 @@
 - TUI 调研结论：当前 `main.rs` 默认进入普通 stdin REPL，代码中没有终端绘制层。适合新增 `src/entry/tui.rs` 作为瘦入口，通过 `DaemonClient`/现有 RPC 消费事件；不应把 LoopEngine、Provider 或安全逻辑复制到 TUI。
 - 依赖选择：`ratatui 0.30.2`（MIT，MSRV 1.88，默认 crossterm backend）+ `crossterm 0.29.0`（MIT）；当前工具链为 Rust 1.98.1，满足要求。TUI 需要处理 raw mode、alternate screen、输入框、事件流、审批 y/N、Ctrl-C 和退出清理。
 - TUI 优化核对：原界面默认颜色继承终端荧光绿；原滚动按原始行计数且使用 usize::MAX 哨兵，导致中文换行和 PageUp 不正确。改为显式 RGB 主题、统一按显示列宽换行、距底部行数滚动。视图独立于 RPC 层，工具结果默认折叠，Markdown 仅处理标题/强调/代码，不改会话内容。
+- 终端主题兼容结论：不能把“支持 RGB 类型”当作“当前会话会正确呈现真彩色”。在 `TERM=dumb`、`NO_COLOR=1` 或终端调色板重映射环境中，固定 RGB 可能被抑制或错误降级。可靠默认值应为 `Color::Reset` 前景/背景并用 Bold/Dim 建立层级；内置 RGB 深色主题只应显式选择。

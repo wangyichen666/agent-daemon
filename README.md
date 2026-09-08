@@ -5,7 +5,7 @@
 ## 功能
 
 - OpenAI Chat Completions 兼容 Provider：解析 SSE 文本增量及分片 function calling，并记录 OpenAI/DeepSeek 缓存命中字段。
-- 全屏终端 TUI：柔和深色主题、居中限宽、Markdown 标题/粗体/代码排版，工具详情默认收起；支持中文换行滚动、流式文本、独立审批面板和可见输入光标。
+- 全屏终端 TUI：默认继承终端前景/背景，兼容浅色、深色和自定义主题；可选真彩深色主题。界面居中限宽，支持 Markdown 标题/粗体/代码排版、工具详情收起、中文换行滚动、流式文本、独立审批面板和可见输入光标。
 - 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
 - `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
@@ -107,6 +107,7 @@ export MODEL_NAME='你的模型名'
 | `MULTIMODAL_ENABLED` | 按模型名检测 | 显式启用/关闭图片内容块 |
 | `MY_AGENT_RUNTIME_DIR` | 系统临时目录 | daemon socket/PID/ready/log 根目录 |
 | `MY_AGENT_API_TOKEN` | 未设置 | HTTP Bearer Token；非回环监听必填 |
+| `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；默认继承终端颜色，`dark` 启用内置真彩深色主题 |
 | `RUST_LOG` | `warn` | tracing 日志过滤 |
 
 ## 使用
@@ -139,6 +140,8 @@ curl http://127.0.0.1:8787/health
 REPL 支持 `/help`、`/status`、`/sessions`、`/new`、`/cancel`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
 
 TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；PageUp/PageDown 查看历史，Ctrl+T 展开/收起工具详情，Ctrl+U 清空草稿，Ctrl+C 取消当前请求。Esc 随时退出界面，空闲时也可输入 `/exit`；退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
+
+TUI 默认使用 `terminal` 主题，不写固定前景/背景色，可跟随终端的浅色、深色或自定义配色。确认终端支持 truecolor 后，可用 `MY_AGENT_TUI_THEME=dark myagent` 启用内置深色主题；若显示异常，取消该变量或设为 `terminal`。
 
 HTTP 请求示例：
 

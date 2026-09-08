@@ -7,30 +7,74 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use super::{TuiState, UiMessage};
+use super::{TuiState, TuiThemeMode, UiMessage};
 use crate::provider::Role;
 
-const BG: Color = Color::Rgb(19, 22, 29);
-const PANEL: Color = Color::Rgb(27, 32, 42);
-const FG: Color = Color::Rgb(220, 225, 234);
-const MUTED: Color = Color::Rgb(143, 155, 174);
-const BORDER: Color = Color::Rgb(62, 73, 91);
-const ACCENT: Color = Color::Rgb(148, 181, 255);
-const WARM: Color = Color::Rgb(230, 185, 119);
-
-fn style(color: Color) -> Style {
-    Style::default().fg(color).bg(BG)
+#[derive(Clone, Copy)]
+struct Theme {
+    background: Color,
+    panel: Color,
+    foreground: Color,
+    muted: Color,
+    border: Color,
+    accent: Color,
+    warm: Color,
+    code: Color,
+    muted_modifier: Modifier,
 }
-fn text(value: impl Into<String>, color: Color) -> Span<'static> {
-    Span::styled(value.into(), style(color))
+
+impl Theme {
+    fn new(mode: TuiThemeMode) -> Self {
+        match mode {
+            TuiThemeMode::Terminal => Self {
+                background: Color::Reset,
+                panel: Color::Reset,
+                foreground: Color::Reset,
+                muted: Color::Reset,
+                border: Color::Reset,
+                accent: Color::Reset,
+                warm: Color::Reset,
+                code: Color::Reset,
+                muted_modifier: Modifier::DIM,
+            },
+            TuiThemeMode::Dark => Self {
+                background: Color::Rgb(19, 22, 29),
+                panel: Color::Rgb(27, 32, 42),
+                foreground: Color::Rgb(220, 225, 234),
+                muted: Color::Rgb(143, 155, 174),
+                border: Color::Rgb(62, 73, 91),
+                accent: Color::Rgb(148, 181, 255),
+                warm: Color::Rgb(230, 185, 119),
+                code: Color::Rgb(166, 206, 189),
+                muted_modifier: Modifier::empty(),
+            },
+        }
+    }
+
+    fn style(self, color: Color) -> Style {
+        Style::default().fg(color).bg(self.background)
+    }
+
+    fn muted_style(self) -> Style {
+        self.style(self.muted).add_modifier(self.muted_modifier)
+    }
+
+    fn text(self, value: impl Into<String>, color: Color) -> Span<'static> {
+        Span::styled(value.into(), self.style(color))
+    }
+
+    fn muted_text(self, value: impl Into<String>) -> Span<'static> {
+        Span::styled(value.into(), self.muted_style())
+    }
 }
 
 pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
+    let theme = Theme::new(state.theme_mode);
     let area = frame.area();
-    frame.render_widget(Block::default().style(style(FG)), area);
+    frame.render_widget(Block::default().style(theme.style(theme.foreground)), area);
     if area.width < 24 || area.height < 12 {
         frame.render_widget(
-            Paragraph::new("请放大终端\n至少 24 列 × 12 行\nEsc 退出").style(style(MUTED)),
+            Paragraph::new("请放大终端\n至少 24 列 × 12 行\nEsc 退出").style(theme.muted_style()),
             area,
         );
         return;
@@ -43,7 +87,9 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         area.height.saturating_sub(2),
     );
     let input_lines = wrap_lines(
-        vec![Line::from(text(format!("{} ", state.input), FG))],
+        vec![Line::from(
+            theme.text(format!("{} ", state.input), theme.foreground),
+        )],
         width.saturating_sub(4),
     );
     let input_height = (input_lines.len() as u16).clamp(1, 4) + 2;
@@ -52,7 +98,7 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         .as_ref()
         .map(|approval| {
             wrap_lines(
-                vec![Line::from(text(&approval.prompt, WARM))],
+                vec![Line::from(theme.text(&approval.prompt, theme.warm))],
                 width.saturating_sub(4),
             )
         })
@@ -82,11 +128,14 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("✦ my-agent", style(ACCENT).add_modifier(Modifier::BOLD)),
-                text("   /   ", BORDER),
-                text(workspace, FG),
+                Span::styled(
+                    "✦ my-agent",
+                    theme.style(theme.accent).add_modifier(Modifier::BOLD),
+                ),
+                theme.text("   /   ", theme.border),
+                theme.text(workspace, theme.foreground),
             ]),
-            Line::from(text("你的终端编码助手 · 对话、规划、执行", MUTED)),
+            Line::from(theme.muted_text("你的终端编码助手 · 对话、规划、执行")),
         ]),
         regions[0],
     );
@@ -94,17 +143,17 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     let lines = if state.messages.is_empty() {
         vec![
             Line::default(),
-            Line::from(text("从一个想法开始。", FG)),
+            Line::from(theme.text("从一个想法开始。", theme.foreground)),
             Line::default(),
-            Line::from(text("  读取 README，帮我了解这个项目", MUTED)),
-            Line::from(text("  先制定计划，再为项目补充测试", MUTED)),
-            Line::from(text("  调研配置读取位置，只返回结论", MUTED)),
+            Line::from(theme.muted_text("  读取 README，帮我了解这个项目")),
+            Line::from(theme.muted_text("  先制定计划，再为项目补充测试")),
+            Line::from(theme.muted_text("  调研配置读取位置，只返回结论")),
         ]
     } else {
         state
             .messages
             .iter()
-            .flat_map(|message| message_lines(message, state.show_tools))
+            .flat_map(|message| message_lines(message, state.show_tools, theme))
             .collect()
     };
     let lines = wrap_lines(lines, width.saturating_sub(2));
@@ -116,7 +165,10 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         .skip(start)
         .take(usize::from(regions[1].height))
         .collect();
-    frame.render_widget(Paragraph::new(visible).style(style(FG)), regions[1]);
+    frame.render_widget(
+        Paragraph::new(visible).style(theme.style(theme.foreground)),
+        regions[1],
+    );
 
     if !approval_lines.is_empty() {
         let mut lines = approval_lines;
@@ -131,26 +183,28 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             .collect();
         lines.push(Line::default());
         lines.push(Line::from(vec![
-            text("Y 允许一次", WARM),
-            text("    N / Enter 拒绝", MUTED),
+            theme.text("Y 允许一次", theme.warm),
+            theme.muted_text("    N / Enter 拒绝"),
         ]));
         frame.render_widget(
-            Paragraph::new(lines).style(style(FG)).block(
-                Block::default()
-                    .title(" 确认 · PgUp/Dn 翻页 ")
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(style(WARM)),
-            ),
+            Paragraph::new(lines)
+                .style(theme.style(theme.foreground))
+                .block(
+                    Block::default()
+                        .title(" 确认 · PgUp/Dn 翻页 ")
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(theme.style(theme.warm)),
+                ),
             regions[2],
         );
     }
 
     let input_area = regions[3];
     let border_color = if state.pending_approval.is_some() {
-        BORDER
+        theme.border
     } else {
-        ACCENT
+        theme.accent
     };
     let title = if state.active.is_some() {
         " 正在工作 · 可以先起草下一条 "
@@ -160,8 +214,8 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color).bg(PANEL))
-        .style(Style::default().fg(FG).bg(PANEL))
+        .border_style(Style::default().fg(border_color).bg(theme.panel))
+        .style(Style::default().fg(theme.foreground).bg(theme.panel))
         .title(title);
     frame.render_widget(block, input_area);
     let inner = Rect::new(
@@ -173,7 +227,7 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     let skip = input_lines.len().saturating_sub(usize::from(inner.height));
     if state.input.is_empty() {
         frame.render_widget(
-            Paragraph::new("描述你想做什么…").style(Style::default().fg(MUTED).bg(PANEL)),
+            Paragraph::new("描述你想做什么…").style(theme.muted_style().bg(theme.panel)),
             inner,
         );
     } else {
@@ -183,13 +237,13 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             .cloned()
             .map(|mut line| {
                 for span in &mut line.spans {
-                    span.style = span.style.bg(PANEL);
+                    span.style = span.style.bg(theme.panel);
                 }
                 line
             })
             .collect();
         frame.render_widget(
-            Paragraph::new(visible).style(Style::default().fg(FG).bg(PANEL)),
+            Paragraph::new(visible).style(Style::default().fg(theme.foreground).bg(theme.panel)),
             inner,
         );
     }
@@ -214,37 +268,40 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     } else {
         "Enter 发送 · Esc 退出".to_owned()
     };
-    frame.render_widget(Paragraph::new(footer).style(style(MUTED)), regions[4]);
+    frame.render_widget(
+        Paragraph::new(footer).style(theme.muted_style()),
+        regions[4],
+    );
 }
 
-fn message_lines(message: &UiMessage, show_tools: bool) -> Vec<Line<'static>> {
+fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Line<'static>> {
     if message.role == Role::Tool {
         let heading = message.content.lines().next().unwrap_or("执行结果");
-        let mut lines = vec![Line::from(text(
-            format!("  ✓ 工具  {}", heading.chars().take(70).collect::<String>()),
-            MUTED,
-        ))];
+        let mut lines = vec![Line::from(theme.muted_text(format!(
+            "  ✓ 工具  {}",
+            heading.chars().take(70).collect::<String>()
+        )))];
         if show_tools {
             lines.extend(
                 message
                     .content
                     .lines()
                     .skip(1)
-                    .map(|line| Line::from(text(format!("    {line}"), MUTED))),
+                    .map(|line| Line::from(theme.muted_text(format!("    {line}")))),
             );
         }
         return lines;
     }
     let (label, color) = match message.role {
-        Role::User => ("›  你", WARM),
-        Role::Assistant => ("✦  Agent", ACCENT),
-        _ => ("·  提示", MUTED),
+        Role::User => ("›  你", theme.warm),
+        Role::Assistant => ("✦  Agent", theme.accent),
+        _ => ("·  提示", theme.muted),
     };
     let mut lines = vec![
         Line::default(),
         Line::from(Span::styled(
             label,
-            style(color).add_modifier(Modifier::BOLD),
+            theme.style(color).add_modifier(Modifier::BOLD),
         )),
         Line::default(),
     ];
@@ -254,20 +311,21 @@ fn message_lines(message: &UiMessage, show_tools: bool) -> Vec<Line<'static>> {
         if trimmed.starts_with("```") {
             code = !code;
             if code {
-                lines.push(Line::from(text(
-                    format!("  ┌ {}", trimmed.trim_start_matches('`')),
-                    MUTED,
-                )));
+                lines.push(Line::from(
+                    theme.muted_text(format!("  ┌ {}", trimmed.trim_start_matches('`'))),
+                ));
             } else {
-                lines.push(Line::from(text("  └", BORDER)));
+                lines.push(Line::from(theme.muted_text("  └")));
             }
         } else if code {
             lines.push(Line::from(vec![
-                text("  │ ", BORDER),
-                text(source, Color::Rgb(166, 206, 189)),
+                theme.muted_text("  │ "),
+                theme.text(source, theme.code),
             ]));
         } else if message.role == Role::User {
-            lines.push(Line::from(text(format!("  {source}"), FG)));
+            lines.push(Line::from(
+                theme.text(format!("  {source}"), theme.foreground),
+            ));
         } else {
             let heading =
                 trimmed.starts_with('#') && trimmed.trim_start_matches('#').starts_with(' ');
@@ -281,12 +339,12 @@ fn message_lines(message: &UiMessage, show_tools: bool) -> Vec<Line<'static>> {
                 .map(|rest| format!("• {rest}"))
                 .unwrap_or_else(|| body.to_owned());
             let base = if heading {
-                style(FG).add_modifier(Modifier::BOLD)
+                theme.style(theme.foreground).add_modifier(Modifier::BOLD)
             } else {
-                style(FG)
+                theme.style(theme.foreground)
             };
-            let mut spans = vec![text("  ", FG)];
-            spans.extend(inline(&body, base));
+            let mut spans = vec![theme.text("  ", theme.foreground)];
+            spans.extend(inline(&body, base, theme));
             lines.push(Line::from(spans));
         }
     }
@@ -295,7 +353,7 @@ fn message_lines(message: &UiMessage, show_tools: bool) -> Vec<Line<'static>> {
 }
 
 // 小范围 Markdown 展示：不修改原始会话，未闭合的流式标记按原文显示。
-fn inline(value: &str, base: Style) -> Vec<Span<'static>> {
+fn inline(value: &str, base: Style, theme: Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = value;
     while !rest.is_empty() {
@@ -316,7 +374,9 @@ fn inline(value: &str, base: Style) -> Vec<Span<'static>> {
         let emphasis = if marker == "**" {
             base.add_modifier(Modifier::BOLD)
         } else {
-            base.fg(ACCENT).bg(PANEL)
+            base.fg(theme.accent)
+                .bg(theme.panel)
+                .add_modifier(Modifier::BOLD)
         };
         spans.push(Span::styled(after[..end].to_owned(), emphasis));
         rest = &after[end + marker.len()..];
@@ -409,6 +469,7 @@ mod tests {
     fn render_wide_narrow_and_approval_preview() {
         for (width, height) in [(110, 42), (44, 30), (24, 12), (16, 8)] {
             let mut state = fixture();
+            state.theme_mode = TuiThemeMode::Dark;
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
             for cell in &terminal.backend().buffer().content {
@@ -441,6 +502,22 @@ mod tests {
             });
             terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
         }
+    }
+
+    #[test]
+    fn terminal_theme_never_paints_a_fixed_background() {
+        let mut state = fixture();
+        state.theme_mode = TuiThemeMode::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(110, 42)).unwrap();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| cell.bg == Color::Reset)
+        );
     }
 
     fn rgb(color: Color) -> String {

@@ -92,3 +92,5 @@
 - TUI 最终验收：`cargo test --all-targets`（58/58）、严格 Clippy、`cargo build --release` 和格式检查全部通过；README 与功能总览 HTML 已同步默认 TUI 用法。
 - TUI 视觉优化：新增 `entry/tui/view.rs`，显式深色主题、108 列居中阅读区、Markdown 基础样式、工具详情折叠、独立可翻页审批区。输入支持粘贴/Alt+Enter 换行/Ctrl+U，q 恢复为普通输入，Esc 随时退出；修正中文滚动并避免空闲重绘。
 - 优化验收：59 项全量测试通过，TUI 测试覆盖 110/44/24/16 列、长回答末尾和翻页；生成 TestBackend 预览并检查。真实 PTY 以隔离工作区和占位模型配置验证启动/输入/Esc/终端恢复，未调用真实 API。
+- TUI 主题兼容修复：确认当前运行环境可出现 `TERM=dumb`、`NO_COLOR=1`，原实现仍强制 RGB 前景与整屏背景，终端降级后会产生异常亮色。默认主题现全部使用终端 Reset 色和粗体/Dim 层级；`MY_AGENT_TUI_THEME=dark` 仅作为显式真彩选项。
+- 主题修复验收：新增“默认主题不绘制任何固定背景”测试，60/60 全量测试、严格 Clippy、release 与格式检查通过；隔离 PTY 中启动并用 Esc 退出，终端状态正常恢复。README、仓库 HTML 和桌面 HTML 已同步。
