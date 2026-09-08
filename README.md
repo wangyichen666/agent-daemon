@@ -5,6 +5,7 @@
 ## 功能
 
 - OpenAI Chat Completions 兼容 Provider：解析 SSE 文本增量及分片 function calling，并记录 OpenAI/DeepSeek 缓存命中字段。
+- 全屏终端 TUI：默认命令进入 ratatui 界面，支持消息滚动、流式文本、工具状态、审批 Y/N、Ctrl-C 取消和退出后保留 daemon 任务。
 - 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
 - `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
@@ -23,7 +24,7 @@ cron 和 MCP 仍是未实现的可选扩展。本项目也不提供多租户、R
 ## 请求链路
 
 ```text
-CLI / HTTP+WebSocket / 标准 ACP stdio
+TUI / CLI / HTTP+WebSocket / 标准 ACP stdio
           │
           ▼
      DaemonClient
@@ -59,6 +60,7 @@ src/daemon/
   server.rs                内存回环与 Unix socket server
 src/entry/
   cli.rs                   REPL、恢复活动请求、流式显示、slash 命令、Ctrl-C 取消
+  tui.rs                   ratatui 全屏界面、输入框、事件流、审批和取消
   serve.rs                 health、OpenAI 兼容 HTTP/SSE 与全双工 WebSocket
   editor.rs                标准 ACP v1 stdio server、恢复与权限请求
 src/entry/recovery.rs      三入口共享的 session.load、approval、active subscribe helper
@@ -110,8 +112,11 @@ export MODEL_NAME='你的模型名'
 ## 使用
 
 ```bash
-# 默认进入交互式 CLI；daemon 不存在时自动拉起
+# 默认进入全屏 TUI；daemon 不存在时自动拉起
 ./target/release/my-agent
+
+# 仍可使用普通 REPL
+./target/release/my-agent chat
 
 # 一次性提问
 ./target/release/my-agent chat "读取 README 并总结架构"

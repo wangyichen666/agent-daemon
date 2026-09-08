@@ -24,6 +24,7 @@ use daemon::server::run_unix_server;
 use entry::cli::{print_sessions, recover_connection, request_result, run_chat, run_repl};
 use entry::editor::run_acp_server;
 use entry::serve::run_http_server;
+use entry::tui::run_tui;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
@@ -47,6 +48,8 @@ enum Command {
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
+    #[command(about = "启动终端 TUI 对话界面")]
+    Tui,
     #[command(about = "启动本地 OpenAI 兼容 HTTP API")]
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787", help = "HTTP 监听地址")]
@@ -77,9 +80,10 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     let workspace = canonical_workspace(&cli.workspace)?;
-    let command = cli.command.unwrap_or(Command::Chat { prompt: Vec::new() });
+    let command = cli.command.unwrap_or(Command::Tui);
     match command {
         Command::Chat { prompt } => run_chat_command(&workspace, prompt).await,
+        Command::Tui => run_tui_command(&workspace).await,
         Command::Serve { bind } => run_serve_command(&workspace, bind).await,
         Command::Editor => run_editor_command(&workspace).await,
         Command::Daemon => run_daemon_command(&workspace).await,
@@ -124,6 +128,14 @@ async fn run_chat_command(workspace: &Path, prompt: Vec<String>) -> Result<()> {
     } else {
         run_chat(&client, &prompt.join(" ")).await
     }
+}
+
+async fn run_tui_command(workspace: &Path) -> Result<()> {
+    config::validate_environment()?;
+    let paths = RuntimePaths::for_workspace(workspace)?;
+    paths.ensure_daemon(workspace).await?;
+    let client = client::DaemonClient::connect_unix(&paths.socket).await?;
+    run_tui(client).await
 }
 
 async fn run_daemon_command(workspace: &Path) -> Result<()> {

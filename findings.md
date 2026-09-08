@@ -111,3 +111,5 @@
 - 已解决审批重放重复响应问题：订阅时按 `ApprovalBroker` 当前 pending 集合过滤已经被明确处理的旧 `approval_required` 回放；新产生的审批事件仍实时投影。
 - 阶段 C 新发现：`chat.send` 在 `LoopEngine` 完成前持有 daemon history Mutex；若模型等待审批，重连端的 `session.load` 会被永久阻塞。恢复快照现从 append-only session JSONL 读取（每条消息 append 后 flush），并保留内存历史供活动 turn 使用。
 - WebSocket 重连时原外部 request id 映射可能不存在，恢复事件使用 daemon active request id；客户端应以 recovery snapshot 中的 active request id 订阅/取消，测试已覆盖该语义。
+- TUI 调研结论：当前 `main.rs` 默认进入普通 stdin REPL，代码中没有终端绘制层。适合新增 `src/entry/tui.rs` 作为瘦入口，通过 `DaemonClient`/现有 RPC 消费事件；不应把 LoopEngine、Provider 或安全逻辑复制到 TUI。
+- 依赖选择：`ratatui 0.30.2`（MIT，MSRV 1.88，默认 crossterm backend）+ `crossterm 0.29.0`（MIT）；当前工具链为 Rust 1.98.1，满足要求。TUI 需要处理 raw mode、alternate screen、输入框、事件流、审批 y/N、Ctrl-C 和退出清理。

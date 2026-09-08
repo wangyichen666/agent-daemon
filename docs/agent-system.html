@@ -549,8 +549,8 @@
     <div class="eyebrow">Rust · Personal Coding Agent</div>
     <h1>一个请求，如何变成一次可靠的代码行动</h1>
     <p class="lead">
-      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。CLI、本地 HTTP/ WebSocket API 与标准 ACP
-      stdio 三个瘦入口连接同一个后台运行时；请求进入后再恢复记忆、组装上下文、规划、调用工具
+      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。全屏 TUI、CLI、本地 HTTP/WebSocket API 与标准 ACP
+      stdio 入口连接同一个后台运行时；请求进入后再恢复记忆、组装上下文、规划、调用工具
       或委派子 Agent，最后把同一份事件流和可核验结果返回给调用端。
     </p>
     <div class="hero-strip" aria-label="系统关键指标">
@@ -598,7 +598,12 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>三入口对等</h3>
-          <p>CLI、本地 OpenAI 兼容 HTTP/SSE + 全双工 WebSocket、标准 ACP v1 stdio 都复用同一 daemon。</p>
+          <p>全屏 TUI、CLI、本地 OpenAI 兼容 HTTP/SSE + 全双工 WebSocket、标准 ACP v1 stdio 都复用同一 daemon。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>全屏终端 TUI</h3>
+          <p>直接运行 <code>myagent</code> 进入 ratatui 界面，支持输入框、消息滚动、流式输出、工具状态、Y/N 审批和 Ctrl-C 取消。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -657,7 +662,7 @@
           <div class="step-no">01</div>
           <div class="step-body">
             <h3>任一瘦入口接收请求</h3>
-            <p>请求可来自 CLI、<code>/v1/chat/completions</code>、<code>/ws</code> 或标准 ACP stdio；入口只负责输入输出，不创建 Agent 运行时。</p>
+            <p>请求可来自 TUI、CLI、<code>/v1/chat/completions</code>、<code>/ws</code> 或标准 ACP stdio；入口只负责输入输出，不创建 Agent 运行时。</p>
           </div>
         </article>
         <article class="step">
@@ -739,7 +744,7 @@
           <div class="step-no">12</div>
           <div class="step-body">
             <h3>同一事件流投影到入口</h3>
-            <p>CLI 流式打印，HTTP 转成 OpenAI SSE，WebSocket 转发双工 JSON-RPC，ACP 输出标准 SessionNotification/Permission 请求；最终 Response 到达后释放 turn 锁。断线可通过 <code>session.load</code> + <code>agent.subscribe</code> 恢复，Ctrl-C 仅发送取消请求。</p>
+            <p>TUI/CLI 在终端绘制或打印流式文本，HTTP 转成 OpenAI SSE，WebSocket 转发双工 JSON-RPC，ACP 输出标准 SessionNotification/Permission 请求；最终 Response 到达后释放 turn 锁。断线可通过 <code>session.load</code> + <code>agent.subscribe</code> 恢复，Ctrl-C 仅发送取消请求。</p>
           </div>
         </article>
       </div>
@@ -939,7 +944,7 @@
         <article class="panel module-card"><h3><code>main.rs / config.rs</code></h3><p>Clap 子命令、工作区选择、配置聚合检查与首次使用引导。</p></article>
         <article class="panel module-card"><h3><code>daemon/</code></h3><p>DaemonState、协议 SSOT、handlers、审批、运行时装配、生命周期和 Unix socket server。</p></article>
         <article class="panel module-card"><h3><code>client.rs</code></h3><p>持久 Unix 连接、request id 多路复用，以及测试用内存回环传输。</p></article>
-        <article class="panel module-card"><h3><code>entry/</code></h3><p>CLI REPL、本地 HTTP/SSE + WebSocket 和标准 ACP stdio 三个瘦入口；recovery helper 统一恢复逻辑。</p></article>
+        <article class="panel module-card"><h3><code>entry/</code></h3><p>全屏 TUI、CLI REPL、本地 HTTP/SSE + WebSocket 和标准 ACP stdio 入口；recovery helper 统一恢复逻辑。</p></article>
         <article class="panel module-card"><h3><code>provider.rs</code></h3><p>消息协议、Provider trait、OpenAI 兼容请求、SSE 文本和工具调用解析。</p></article>
         <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、50 轮上限、并行波次、工具结果回填与最终终止判断。</p></article>
         <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>
@@ -984,11 +989,12 @@
 <span class="comment"># 非回环 HTTP 或 WebSocket 时设置访问令牌</span>
 <span class="prompt">$</span> export MY_AGENT_API_TOKEN='本地访问令牌'
 
-<span class="comment"># 4. 检查配置并运行 CLI</span>
+<span class="comment"># 4. 检查配置并运行全屏 TUI（默认入口）</span>
 <span class="prompt">$</span> ./target/release/my-agent config check
 <span class="prompt">$</span> ./target/release/my-agent
 
-<span class="comment"># 5. 其他入口</span>
+<span class="comment"># 5. 普通 REPL、HTTP/WebSocket、标准 ACP</span>
+<span class="prompt">$</span> ./target/release/my-agent chat
 <span class="prompt">$</span> ./target/release/my-agent serve --bind 127.0.0.1:8787
 <span class="prompt">$</span> ./target/release/my-agent editor</pre>
         </div>
@@ -1000,7 +1006,8 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>REPL 支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>；运行中按 Ctrl-C 发送显式取消。</li>
+            <li>TUI 直接输入文字并按 Enter 发送；<code>PageUp/PageDown</code> 滚动，Ctrl-C 取消当前 turn，Esc 或空输入时按 <code>q</code> 退出。</li>
+            <li>普通 REPL 支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>；运行中按 Ctrl-C 发送显式取消。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
           </ol>

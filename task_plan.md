@@ -125,3 +125,22 @@
 - `agent.subscribe` 为重连入口，按当前 pending 集合过滤已解决的旧审批回放，避免 ACP 重复弹窗。
 - `session.load` 改从 append-only JSONL 读取快照，审批等待期间不会被内存历史锁阻塞。
 - CLI、标准 ACP、WebSocket 均有断线后恢复活动请求、审批与最终文本的集成测试。
+
+## TUI 入口（2026-09-08）
+
+### 目标
+
+增加类似 Claude Code 的终端交互界面，但保持 TUI 为瘦客户端：不持有 Provider、LoopEngine、session 或审批真相，只通过已有 `DaemonClient` 调用 daemon。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| T1. 终端基础设施 | complete | ratatui/crossterm、终端原始模式、退出恢复、`tui` 子命令 |
+| T2. 对话与事件流 | complete | 输入框、消息滚动、文本增量、工具状态和终态响应 |
+| T3. 审批/取消/重连 | complete | y/N 审批、Ctrl-C 取消、session.load + agent.subscribe 恢复 |
+| T4. 验收与文档 | complete | TUI 单元测试、命令文档、HTML/README 同步、全量构建验证 |
+
+### 架构决策
+
+- TUI 代码放在当前仓库的 `src/entry/tui.rs`，因为它是本项目的正式入口，需要与协议类型和 `DaemonClient` 一起版本化。
+- TUI 不应复制 `LoopEngine` 或直接调用工具；daemon 仍是唯一真相源，未来 ACP/HTTP/CLI/TUI 共用同一套事件语义。
+- 仅把终端绘制和用户输入放在 TUI；恢复、审批响应、取消和请求生命周期通过现有 RPC 完成。
