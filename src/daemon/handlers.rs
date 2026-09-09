@@ -4,10 +4,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
 use super::protocol::{EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, ServerFrame};
-use super::{ActiveRequest, ActiveRequestUpdate, DaemonState};
+use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
 use crate::cron::ScheduleSpec;
 use crate::loop_engine::{AgentEvent, CancellationToken};
 use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
@@ -21,6 +21,8 @@ const REQUEST_CONFLICT: i64 = -32001;
 #[derive(Deserialize)]
 struct ChatSendParams {
     message: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +34,8 @@ struct ApprovalRespondParams {
 #[derive(Deserialize)]
 struct CancelParams {
     request_id: RequestId,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -39,9 +43,17 @@ struct SessionResumeParams {
     session_id: String,
 }
 
+#[derive(Deserialize, Default)]
+struct SessionSelectorParams {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct SlashExecuteParams {
     line: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 impl DaemonState {
@@ -53,7 +65,10 @@ impl DaemonState {
         match request.method.as_str() {
             "chat.send" => self.handle_chat_send(request, frames).await,
             "session.load" => {
-                let result = self.session_load().await;
+                let result = match parse_params::<SessionSelectorParams>(&request.params) {
+                    Ok(params) => self.session_load(params.session_id.as_deref()).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "session.list" => {
@@ -85,7 +100,10 @@ impl DaemonState {
             }
             "agent.cancel" => {
                 let result = match parse_params::<CancelParams>(&request.params) {
-                    Ok(params) => self.cancel(&params.request_id).await,
+                    Ok(params) => {
+                        self.cancel(&params.request_id, params.session_id.as_deref())
+                            .await
+                    }
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -93,7 +111,10 @@ impl DaemonState {
             "agent.subscribe" => self.handle_subscribe(request, frames).await,
             "slash.execute" => {
                 let result = match parse_params::<SlashExecuteParams>(&request.params) {
-                    Ok(params) => self.execute_slash(&params.line).await,
+                    Ok(params) => {
+                        self.execute_slash(&params.line, params.session_id.as_deref())
+                            .await
+                    }
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -141,9 +162,21 @@ impl DaemonState {
             }
         };
 
+        let session = match self.session_runtime(params.session_id.as_deref()).await {
+            Ok(session) => session,
+            Err(error) => {
+                send_result(&frames, request.id, Err(error));
+                return;
+            }
+        };
+        let session_id = session.id.clone();
+        let active_key = ActiveKey {
+            session_id: session_id.clone(),
+            request_id: request.id.clone(),
+        };
         let cancellation = CancellationToken::new();
         let mut active = self.active.lock().await;
-        if active.contains_key(&request.id) {
+        if active.contains_key(&active_key) {
             drop(active);
             send_result(
                 &frames,
@@ -152,16 +185,19 @@ impl DaemonState {
             );
             return;
         }
-        active.insert(request.id.clone(), ActiveRequest::new(cancellation.clone()));
+        active.insert(active_key.clone(), ActiveRequest::new(cancellation.clone()));
         drop(active);
 
         let (agent_events, mut event_receiver) = mpsc::unbounded_channel();
         let (approval_events, mut approval_receiver) = mpsc::unbounded_channel();
-        let run = self
-            .approvals
-            .with_context(request.id.clone(), approval_events, async {
-                let mut history = self.history.lock().await;
-                self.engine
+        let run = self.approvals.with_session_context(
+            session_id.clone(),
+            request.id.clone(),
+            approval_events,
+            async {
+                let mut history = session.history.lock().await;
+                session
+                    .engine
                     .run_turn_with_events(
                         &mut history,
                         params.message,
@@ -169,7 +205,8 @@ impl DaemonState {
                         cancellation,
                     )
                     .await
-            });
+            },
+        );
         tokio::pin!(run);
 
         let result = loop {
@@ -179,7 +216,7 @@ impl DaemonState {
                     if let Some(event) = event {
                         self.publish_update(
                             &frames,
-                            &request.id,
+                            &active_key,
                             agent_event_update(event),
                         ).await;
                     }
@@ -188,7 +225,7 @@ impl DaemonState {
                     if let Some(ServerFrame::Event(event)) = approval {
                         self.publish_update(
                             &frames,
-                            &request.id,
+                            &active_key,
                             ActiveRequestUpdate::Event {
                                 kind: event.event,
                                 data: event.data,
@@ -199,13 +236,13 @@ impl DaemonState {
             }
         };
         while let Ok(event) = event_receiver.try_recv() {
-            self.publish_update(&frames, &request.id, agent_event_update(event))
+            self.publish_update(&frames, &active_key, agent_event_update(event))
                 .await;
         }
         while let Ok(ServerFrame::Event(event)) = approval_receiver.try_recv() {
             self.publish_update(
                 &frames,
-                &request.id,
+                &active_key,
                 ActiveRequestUpdate::Event {
                     kind: event.event,
                     data: event.data,
@@ -223,63 +260,66 @@ impl DaemonState {
         };
         self.publish_update(
             &frames,
-            &request.id,
+            &active_key,
             ActiveRequestUpdate::Terminal(response),
         )
         .await;
-        self.active.lock().await.remove(&request.id);
+        self.active.lock().await.remove(&active_key);
     }
 
-    async fn session_load(&self) -> Result<Value, (i64, String)> {
-        let _switch = self.session_switch.lock().await;
-        self.session_snapshot().await
-    }
-
-    async fn session_snapshot(&self) -> Result<Value, (i64, String)> {
-        // 活动 turn（尤其是等待人工审批时）会长期持有内存历史锁。恢复端必须仍能
-        // 立即读取快照，因此以每条消息均已 flush 的 append-only 会话文件为来源。
-        let history = self
+    async fn session_runtime(
+        &self,
+        requested_id: Option<&str>,
+    ) -> Result<Arc<SessionRuntime>, (i64, String)> {
+        let session_id = match requested_id {
+            Some(session_id) => session_id.to_owned(),
+            None => self.legacy_session_id.lock().await.clone(),
+        };
+        if session_id == self.default_session.id {
+            return Ok(self.default_session.clone());
+        }
+        if let Some(runtime) = self.sessions.lock().await.get(&session_id).cloned() {
+            return Ok(runtime);
+        }
+        let store = self
             .session
+            .open_session(&session_id)
+            .map_err(|error| (INVALID_PARAMS, format!("{error:#}")))?;
+        let store = Arc::new(store);
+        let history = store
             .load()
             .await
             .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
-        let approvals = self.approvals.pending().await;
-        let active_requests = self
-            .active
-            .lock()
-            .await
-            .keys()
-            .cloned()
-            .collect::<Vec<RequestId>>();
-        Ok(json!({
-            "session_id": self.session.current_id().await,
-            "messages": history,
-            "pending_approvals": approvals,
-            "active_requests": active_requests,
-        }))
-    }
-
-    async fn session_list(&self) -> Result<Value, (i64, String)> {
-        self.session
-            .list_sessions()
-            .await
-            .map(|sessions| json!({"sessions": sessions}))
-            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))
+        let runtime = Arc::new(SessionRuntime {
+            id: session_id.clone(),
+            engine: Arc::new(self.default_session.engine.for_session(store.clone())),
+            history: Mutex::new(history),
+            store,
+        });
+        let mut sessions = self.sessions.lock().await;
+        Ok(sessions
+            .entry(session_id)
+            .or_insert_with(|| runtime.clone())
+            .clone())
     }
 
     async fn session_new(&self) -> Result<Value, (i64, String)> {
-        let _switch = self.session_switch.lock().await;
-        let active = self.active.lock().await;
-        if !active.is_empty() {
-            return Err((REQUEST_CONFLICT, "有请求正在执行，不能新建会话".to_owned()));
-        }
-        let mut history = self.history.lock().await;
-        let session_id = self
+        let (session_id, store) = self
             .session
-            .start_new()
-            .await
+            .create_isolated_session()
             .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
-        history.clear();
+        let store = Arc::new(store);
+        let runtime = Arc::new(SessionRuntime {
+            id: session_id.clone(),
+            engine: Arc::new(self.default_session.engine.for_session(store.clone())),
+            history: Mutex::new(Vec::new()),
+            store,
+        });
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), runtime);
+        *self.legacy_session_id.lock().await = session_id.clone();
         Ok(json!({
             "created": true,
             "session_id": session_id,
@@ -289,119 +329,194 @@ impl DaemonState {
         }))
     }
 
-    async fn session_resume(&self, session_id: &str) -> Result<Value, (i64, String)> {
-        let _switch = self.session_switch.lock().await;
-        if self.session.current_id().await == session_id {
-            return self.session_snapshot().await;
-        }
-        let active = self.active.lock().await;
-        if !active.is_empty() {
-            return Err((REQUEST_CONFLICT, "有请求正在执行，不能切换会话".to_owned()));
-        }
-        let mut current_history = self.history.lock().await;
-        let history = self
-            .session
-            .resume(session_id)
+    async fn session_load(&self, session_id: Option<&str>) -> Result<Value, (i64, String)> {
+        let runtime = self.session_runtime(session_id).await?;
+        self.session_snapshot(&runtime.id).await
+    }
+
+    async fn session_snapshot(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        // 活动 turn（尤其是等待人工审批时）会长期持有内存历史锁。恢复端必须仍能
+        // 立即读取快照，因此以每条消息均已 flush 的 append-only 会话文件为来源。
+        let runtime = self.session_runtime(Some(session_id)).await?;
+        let history = runtime
+            .store
+            .load()
             .await
-            .map_err(|error| (INVALID_PARAMS, format!("{error:#}")))?;
-        current_history.clone_from(&history);
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let active = self.active.lock().await;
+        let active_requests = active
+            .keys()
+            .filter(|key| key.session_id == session_id)
+            .map(|key| key.request_id.clone())
+            .collect::<Vec<RequestId>>();
+        let request_ids = active
+            .keys()
+            .filter(|key| key.session_id == session_id)
+            .map(|key| key.request_id.clone())
+            .collect::<HashSet<RequestId>>();
+        drop(active);
+        let approvals = self
+            .approvals
+            .pending_for_session(Some(session_id))
+            .await
+            .into_iter()
+            .filter(|approval| request_ids.contains(&approval.request_id))
+            .collect::<Vec<_>>();
         Ok(json!({
-            "resumed": true,
-            "session_id": self.session.current_id().await,
+            "session_id": session_id,
             "messages": history,
-            "pending_approvals": [],
-            "active_requests": [],
+            "pending_approvals": approvals,
+            "active_requests": active_requests,
         }))
     }
 
-    async fn execute_slash(&self, line: &str) -> Result<Value, (i64, String)> {
+    async fn session_list(&self) -> Result<Value, (i64, String)> {
+        Ok(json!({"sessions": self.session_infos().await?}))
+    }
+
+    async fn session_infos(&self) -> Result<Vec<crate::session::SessionInfo>, (i64, String)> {
+        let mut sessions = self
+            .session
+            .list_sessions()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let current_id = self.legacy_session_id.lock().await.clone();
+        for session in &mut sessions {
+            session.active = session.id == current_id;
+        }
+        let runtimes = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for runtime in runtimes {
+            if sessions.iter().any(|session| session.id == runtime.id) {
+                continue;
+            }
+            sessions.push(crate::session::SessionInfo {
+                id: runtime.id.clone(),
+                path: runtime.store.path_for_session(&runtime.id),
+                active: runtime.id == current_id,
+                message_count: 0,
+                modified_at: None,
+                preview: None,
+            });
+        }
+        if !sessions.iter().any(|session| session.id == current_id) {
+            sessions.push(crate::session::SessionInfo {
+                id: current_id.clone(),
+                path: self.session.path_for_session(&current_id),
+                active: true,
+                message_count: 0,
+                modified_at: None,
+                preview: None,
+            });
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .active
+                .cmp(&left.active)
+                .then_with(|| right.modified_at.cmp(&left.modified_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(sessions)
+    }
+
+    async fn session_resume(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        self.session_runtime(Some(session_id)).await?;
+        let mut snapshot = self.session_snapshot(session_id).await?;
+        snapshot["resumed"] = json!(true);
+        Ok(snapshot)
+    }
+
+    async fn execute_slash(
+        &self,
+        line: &str,
+        session_id: Option<&str>,
+    ) -> Result<Value, (i64, String)> {
         let registry = SlashRegistry::builtin();
-        let response =
-            match registry.parse(line) {
-                SlashParse::NotCommand => SlashResponse::Text {
-                    content: "输入不是 slash 命令".to_owned(),
+        let response = match registry.parse(line) {
+            SlashParse::NotCommand => SlashResponse::Text {
+                content: "输入不是 slash 命令".to_owned(),
+            },
+            SlashParse::Error(content) => SlashResponse::Text { content },
+            SlashParse::Command(invocation) => match invocation.action {
+                SlashAction::Help => SlashResponse::Text {
+                    content: registry.help(),
                 },
-                SlashParse::Error(content) => SlashResponse::Text { content },
-                SlashParse::Command(invocation) => match invocation.action {
-                    SlashAction::Help => SlashResponse::Text {
-                        content: registry.help(),
-                    },
-                    SlashAction::Status => {
-                        let snapshot = self.session_snapshot().await?;
-                        SlashResponse::Text {
-                            content: format!(
-                                "会话 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
-                                snapshot["session_id"].as_str().unwrap_or("unknown"),
-                                snapshot["messages"].as_array().map_or(0, Vec::len),
-                                snapshot["active_requests"].as_array().map_or(0, Vec::len),
-                                snapshot["pending_approvals"].as_array().map_or(0, Vec::len),
-                            ),
-                        }
+                SlashAction::Status => {
+                    let current_session = self.session_runtime(session_id).await?;
+                    let snapshot = self.session_snapshot(&current_session.id).await?;
+                    SlashResponse::Text {
+                        content: format!(
+                            "会话 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
+                            snapshot["session_id"].as_str().unwrap_or("unknown"),
+                            snapshot["messages"].as_array().map_or(0, Vec::len),
+                            snapshot["active_requests"].as_array().map_or(0, Vec::len),
+                            snapshot["pending_approvals"].as_array().map_or(0, Vec::len),
+                        ),
                     }
-                    SlashAction::Sessions => SlashResponse::Sessions {
-                        sessions: self.session.list_sessions().await.map_err(|error| {
-                            (INTERNAL_ERROR, format!("列出会话失败：{error:#}"))
-                        })?,
-                        select: false,
-                    },
-                    SlashAction::Resume if invocation.args.is_empty() => SlashResponse::Sessions {
-                        sessions: self
-                            .session
-                            .list_sessions()
-                            .await
-                            .map_err(|error| (INTERNAL_ERROR, format!("列出会话失败：{error:#}")))?
-                            .into_iter()
-                            .filter(|session| session.message_count > 0)
-                            .collect(),
-                        select: true,
-                    },
-                    SlashAction::Resume => {
-                        let sessions = self
-                            .session
-                            .list_sessions()
-                            .await
-                            .map_err(|error| (INTERNAL_ERROR, format!("列出会话失败：{error:#}")))?
-                            .into_iter()
-                            .filter(|session| session.message_count > 0)
-                            .collect::<Vec<_>>();
-                        let selection = &invocation.args[0];
-                        let session_id = match selection.parse::<usize>() {
-                            Ok(index) if index > 0 => sessions
-                                .get(index - 1)
-                                .map(|session| session.id.clone())
-                                .ok_or_else(|| {
-                                    (INVALID_PARAMS, format!("会话编号超出范围：{index}"))
-                                })?,
-                            Ok(_) => return Err((INVALID_PARAMS, "会话编号从 1 开始".to_owned())),
-                            Err(_) => selection.clone(),
-                        };
-                        let snapshot = self.session_resume(&session_id).await?;
-                        let count = snapshot["messages"].as_array().map_or(0, Vec::len);
-                        SlashResponse::SessionChanged {
-                            message: format!("已恢复会话 {session_id}，共 {count} 条消息。"),
-                            snapshot,
-                        }
-                    }
-                    SlashAction::New => {
-                        let snapshot = self.session_new().await?;
-                        let session_id = snapshot["session_id"].as_str().unwrap_or("unknown");
-                        SlashResponse::SessionChanged {
-                            message: format!("已新建会话：{session_id}"),
-                            snapshot,
-                        }
-                    }
-                    SlashAction::Cancel => SlashResponse::Text {
-                        content: "当前没有前台请求；运行中按 Ctrl-C 可取消本轮。".to_owned(),
-                    },
-                    SlashAction::Skill => self.execute_skill_command(&invocation.args).await,
-                    SlashAction::Cron => self.execute_cron_command(&invocation.args).await,
-                    SlashAction::Mcp => self.execute_mcp_command(&invocation.args).await,
-                    SlashAction::Ping => SlashResponse::Text {
-                        content: "pong".to_owned(),
-                    },
-                    SlashAction::Exit => SlashResponse::Exit,
+                }
+                SlashAction::Sessions => SlashResponse::Sessions {
+                    sessions: self.session_infos().await?,
+                    select: false,
                 },
-            };
+                SlashAction::Resume if invocation.args.is_empty() => SlashResponse::Sessions {
+                    sessions: self
+                        .session_infos()
+                        .await?
+                        .into_iter()
+                        .filter(|session| session.message_count > 0)
+                        .collect(),
+                    select: true,
+                },
+                SlashAction::Resume => {
+                    let sessions = self
+                        .session_infos()
+                        .await?
+                        .into_iter()
+                        .filter(|session| session.message_count > 0)
+                        .collect::<Vec<_>>();
+                    let selection = &invocation.args[0];
+                    let session_id = match selection.parse::<usize>() {
+                        Ok(index) if index > 0 => sessions
+                            .get(index - 1)
+                            .map(|session| session.id.clone())
+                            .ok_or_else(|| {
+                                (INVALID_PARAMS, format!("会话编号超出范围：{index}"))
+                            })?,
+                        Ok(_) => return Err((INVALID_PARAMS, "会话编号从 1 开始".to_owned())),
+                        Err(_) => selection.clone(),
+                    };
+                    let snapshot = self.session_resume(&session_id).await?;
+                    let count = snapshot["messages"].as_array().map_or(0, Vec::len);
+                    SlashResponse::SessionChanged {
+                        message: format!("已恢复会话 {session_id}，共 {count} 条消息。"),
+                        snapshot,
+                    }
+                }
+                SlashAction::New => {
+                    let snapshot = self.session_new().await?;
+                    let session_id = snapshot["session_id"].as_str().unwrap_or("unknown");
+                    SlashResponse::SessionChanged {
+                        message: format!("已新建会话：{session_id}"),
+                        snapshot,
+                    }
+                }
+                SlashAction::Cancel => SlashResponse::Text {
+                    content: "当前没有前台请求；运行中按 Ctrl-C 可取消本轮。".to_owned(),
+                },
+                SlashAction::Skill => self.execute_skill_command(&invocation.args).await,
+                SlashAction::Cron => self.execute_cron_command(&invocation.args).await,
+                SlashAction::Mcp => self.execute_mcp_command(&invocation.args).await,
+                SlashAction::Ping => SlashResponse::Text {
+                    content: "pong".to_owned(),
+                },
+                SlashAction::Exit => SlashResponse::Exit,
+            },
+        };
         serde_json::to_value(response)
             .map_err(|error| (INTERNAL_ERROR, format!("序列化 slash 响应失败：{error}")))
     }
@@ -595,8 +710,15 @@ impl DaemonState {
             .active
             .lock()
             .await
-            .get(&params.request_id)
-            .map(ActiveRequest::subscribe)
+            .iter()
+            .find(|(key, _)| {
+                key.request_id == params.request_id
+                    && params
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|session_id| key.session_id == session_id)
+            })
+            .map(|(_, active)| active.subscribe())
         else {
             send_result(
                 &frames,
@@ -664,27 +786,50 @@ impl DaemonState {
     async fn publish_update(
         &self,
         frames: &mpsc::UnboundedSender<ServerFrame>,
-        request_id: &RequestId,
+        active_key: &ActiveKey,
         update: ActiveRequestUpdate,
     ) {
-        if let Some(active) = self.active.lock().await.get_mut(request_id) {
+        if let Some(active) = self.active.lock().await.get_mut(active_key) {
             active.publish(update.clone());
         }
-        let _ = frames.send(update.to_frame(request_id.clone()));
+        let _ = frames.send(update.to_frame(active_key.request_id.clone()));
     }
 
-    async fn cancel(&self, request_id: &RequestId) -> Result<Value, (i64, String)> {
+    async fn cancel(
+        &self,
+        request_id: &RequestId,
+        session_id: Option<&str>,
+    ) -> Result<Value, (i64, String)> {
+        let matching_key = self
+            .active
+            .lock()
+            .await
+            .keys()
+            .find(|key| {
+                &key.request_id == request_id
+                    && session_id.is_none_or(|session_id| key.session_id == session_id)
+            })
+            .cloned();
+        let Some(matching_key) = matching_key else {
+            return Ok(json!({"cancelled": false, "reason": "请求未在执行"}));
+        };
         let token = self
             .active
             .lock()
             .await
-            .get(request_id)
+            .get(&matching_key)
             .map(|active| active.cancellation.clone());
         let Some(token) = token else {
             return Ok(json!({"cancelled": false, "reason": "请求未在执行"}));
         };
         token.cancel();
-        self.approvals.cancel_request(request_id).await;
+        if let Some(session_id) = session_id {
+            self.approvals
+                .cancel_request_in_session(session_id, request_id)
+                .await;
+        } else {
+            self.approvals.cancel_request(request_id).await;
+        }
         Ok(json!({"cancelled": true}))
     }
 }

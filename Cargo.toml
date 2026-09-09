@@ -17,6 +17,7 @@ cron = "=0.17.0"
 crossterm = "=0.29.0"
 futures-util = "0.3"
 lopdf = { version = "0.38", default-features = false }
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ratatui = "=0.30.2"
 serde = { version = "1", features = ["derive"] }

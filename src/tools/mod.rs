@@ -18,6 +18,12 @@ pub use exec::ExecTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
 
+#[async_trait]
+pub trait ToolCancellation: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+    async fn cancelled(&self);
+}
+
 #[derive(Debug, Error)]
 pub enum ToolAdmissionError {
     #[error("未知工具: {0}")]
@@ -47,6 +53,14 @@ pub trait Tool: Send + Sync {
 
     async fn execute_rich(&self, args: Value) -> Result<ToolOutput> {
         self.execute(args).await.map(ToolOutput::text)
+    }
+
+    async fn execute_rich_with_cancellation(
+        &self,
+        args: Value,
+        _cancellation: &dyn ToolCancellation,
+    ) -> Result<ToolOutput> {
+        self.execute_rich(args).await
     }
 }
 
@@ -124,12 +138,27 @@ impl ToolRegistry {
         specs
     }
 
+    #[allow(dead_code)]
     pub async fn execute(&self, name: &str, args: Value) -> Result<ToolOutput> {
         self.admit(name, &args)?;
         let tool = self
             .resolve(name)
             .ok_or_else(|| ToolAdmissionError::UnknownTool(name.to_owned()))?;
         tool.execute_rich(args).await
+    }
+
+    pub async fn execute_with_cancellation(
+        &self,
+        name: &str,
+        args: Value,
+        cancellation: &dyn ToolCancellation,
+    ) -> Result<ToolOutput> {
+        self.admit(name, &args)?;
+        let tool = self
+            .resolve(name)
+            .ok_or_else(|| ToolAdmissionError::UnknownTool(name.to_owned()))?;
+        tool.execute_rich_with_cancellation(args, cancellation)
+            .await
     }
 
     pub fn admit_all(&self, calls: &[crate::provider::ToolCall]) -> Result<(), ToolAdmissionError> {

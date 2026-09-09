@@ -240,3 +240,28 @@
 - Slash 接线首次 check 发现已删除的 TUI 本地编号解析测试与两个 dead-code helper；删除平行解析测试/旧 recovery helper，并将仅测试注册表枚举收窄为 cfg(test)。
 - Skill 依赖首次 check 通过但发现两个仅测试构造器在生产目标 dead_code；用 cfg(test) 收窄，并把旧无 frontmatter 的 context fixture 升级为新格式。
 - Cron 首次 check 发现 slash 参数解析使用了未导入的 anyhow Context；补齐 trait import。生产目标还提示测试兼容构造器 dead_code，已用 cfg(test) 收窄。
+
+## 多窗口独立 session（2026-09-09）
+
+### 目标
+
+同一台电脑上的每个 TUI/编辑器窗口拥有独立 session；一个窗口中的活动请求、历史、取消、审批和事件订阅不阻塞或串入另一个窗口。旧客户端未携带 `session_id` 时继续落到 daemon 默认 session，以保持兼容。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| 1. 会话存储与运行时隔离 | complete | 按 session ID 打开固定 JSONL 文件，不竞争全局 current 指针；每个 session 拥有独立 history/turn lock/engine |
+| 2. daemon RPC 路由 | complete | `session.new/load/resume` 返回并操作指定 session；`chat.send/cancel/subscribe/snapshot` 按 session 过滤 |
+| 3. TUI/入口接线 | complete | TUI 在所有 chat 请求中携带自己的 session ID，启动新窗口不再接回别的窗口活动请求 |
+| 4. 回归与发布 | complete | 多 session 并发、隔离取消/审批、兼容旧客户端、fmt/clippy/test/release、安装 `myagent` |
+
+### 约束
+
+- 不删除或覆盖既有 JSONL 会话；仍支持 `/resume` 明确恢复历史。
+- 不再用全局 `session_switch` 阻塞无关 session；current pointer 仅作为旧客户端默认 session 的兼容指针。
+- 记录每次失败的验证命令和原因，完成后追加到 findings/progress。
+
+### 验收
+
+- `cargo test --all-targets`：107/107 通过。
+- `cargo clippy --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check`：通过。
+- `cargo build --release` 与 `cargo install --path . --force`：通过；`myagent` 与 `my-agent` 均指向最新 release 二进制。

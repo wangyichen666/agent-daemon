@@ -58,3 +58,16 @@ pub async fn subscribe(client: &DaemonClient, request_id: &RequestId) -> Result<
         .request("agent.subscribe", json!({"request_id": request_id}))
         .await
 }
+
+pub async fn subscribe_for_session(
+    client: &DaemonClient,
+    request_id: &RequestId,
+    session_id: &str,
+) -> Result<RpcStream> {
+    client
+        .request(
+            "agent.subscribe",
+            json!({"request_id": request_id, "session_id": session_id}),
+        )
+        .await
+}

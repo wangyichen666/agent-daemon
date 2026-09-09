@@ -37,11 +37,13 @@ struct ApprovalBrokerInner {
 #[derive(Clone)]
 struct ApprovalContext {
     request_id: RequestId,
+    session_id: Option<String>,
     events: mpsc::UnboundedSender<ServerFrame>,
 }
 
 struct PendingApproval {
     info: PendingApprovalInfo,
+    session_id: Option<String>,
     response: oneshot::Sender<bool>,
 }
 
@@ -50,6 +52,7 @@ impl ApprovalBroker {
         Self::default()
     }
 
+    #[cfg(test)]
     pub async fn with_context<F>(
         &self,
         request_id: RequestId,
@@ -60,7 +63,36 @@ impl ApprovalBroker {
         F: Future,
     {
         ACTIVE_APPROVAL_CONTEXT
-            .scope(ApprovalContext { request_id, events }, future)
+            .scope(
+                ApprovalContext {
+                    request_id,
+                    session_id: None,
+                    events,
+                },
+                future,
+            )
+            .await
+    }
+
+    pub async fn with_session_context<F>(
+        &self,
+        session_id: impl Into<String>,
+        request_id: RequestId,
+        events: mpsc::UnboundedSender<ServerFrame>,
+        future: F,
+    ) -> F::Output
+    where
+        F: Future,
+    {
+        ACTIVE_APPROVAL_CONTEXT
+            .scope(
+                ApprovalContext {
+                    request_id,
+                    session_id: Some(session_id.into()),
+                    events,
+                },
+                future,
+            )
             .await
     }
 
@@ -75,10 +107,21 @@ impl ApprovalBroker {
     }
 
     pub async fn cancel_request(&self, request_id: &RequestId) {
+        self.cancel_matching(None, request_id).await;
+    }
+
+    pub async fn cancel_request_in_session(&self, session_id: &str, request_id: &RequestId) {
+        self.cancel_matching(Some(session_id), request_id).await;
+    }
+
+    async fn cancel_matching(&self, session_id: Option<&str>, request_id: &RequestId) {
         let mut pending = self.inner.pending.lock().await;
         let matching = pending
             .iter()
-            .filter(|(_, value)| &value.info.request_id == request_id)
+            .filter(|(_, value)| {
+                &value.info.request_id == request_id
+                    && session_id.is_none_or(|session| value.session_id.as_deref() == Some(session))
+            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<String>>();
         for id in matching {
@@ -89,12 +132,19 @@ impl ApprovalBroker {
     }
 
     pub async fn pending(&self) -> Vec<PendingApprovalInfo> {
+        self.pending_for_session(None).await
+    }
+
+    pub async fn pending_for_session(&self, session_id: Option<&str>) -> Vec<PendingApprovalInfo> {
         let mut pending = self
             .inner
             .pending
             .lock()
             .await
             .values()
+            .filter(|value| {
+                session_id.is_none_or(|session| value.session_id.as_deref() == Some(session))
+            })
             .map(|value| value.info.clone())
             .collect::<Vec<PendingApprovalInfo>>();
         pending.sort_by(|left, right| left.id.cmp(&right.id));
@@ -120,6 +170,7 @@ impl Approval for ApprovalBroker {
             approval_id.clone(),
             PendingApproval {
                 info: info.clone(),
+                session_id: context.session_id,
                 response,
             },
         );
@@ -215,5 +266,44 @@ mod tests {
         broker.respond(second_id, false).await.unwrap();
         assert!(first.await.unwrap().unwrap());
         assert!(!second.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_scoped_to_session_even_when_request_ids_repeat() {
+        let broker = ApprovalBroker::new();
+        let (first_events, mut first_receiver) = mpsc::unbounded_channel();
+        let (second_events, mut second_receiver) = mpsc::unbounded_channel();
+        let first_broker = broker.clone();
+        let first = tokio::spawn(async move {
+            first_broker
+                .with_session_context("session-a", RequestId::Number(1), first_events, async {
+                    first_broker.request("第一个审批").await
+                })
+                .await
+        });
+        let second_broker = broker.clone();
+        let second = tokio::spawn(async move {
+            second_broker
+                .with_session_context("session-b", RequestId::Number(1), second_events, async {
+                    second_broker.request("第二个审批").await
+                })
+                .await
+        });
+        let first_id = match first_receiver.recv().await.unwrap() {
+            ServerFrame::Event(event) => event.data["approval"]["id"].as_str().unwrap().to_owned(),
+            _ => panic!("预期第一个审批事件"),
+        };
+        let second_id = match second_receiver.recv().await.unwrap() {
+            ServerFrame::Event(event) => event.data["approval"]["id"].as_str().unwrap().to_owned(),
+            _ => panic!("预期第二个审批事件"),
+        };
+        broker
+            .cancel_request_in_session("session-a", &RequestId::Number(1))
+            .await;
+        assert!(!first.await.unwrap().unwrap());
+        assert_eq!(broker.pending_for_session(Some("session-a")).await.len(), 0);
+        broker.respond(&second_id, true).await.unwrap();
+        assert!(second.await.unwrap().unwrap());
+        let _ = first_id;
     }
 }

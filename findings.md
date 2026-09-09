@@ -223,3 +223,13 @@
 - 活动流改为 `Vec<ActiveTurn>`、审批改为 `VecDeque`；恢复快照完整保留每个 active request 并逐一订阅，流式文本和工具卡片按请求 ID 分离，避免并发串流。
 - 主题扩展为 terminal/dark/light；Theme 以 info/success/error/warm/code/diff-add/diff-remove 等语义 token 供组件使用，终端模式继续只用 Reset 色。
 - 新增输入 CJK、缓存失效、浅色语义色及并发 request/审批队列回归测试。
+
+## 多窗口独立 session（2026-09-09）
+
+- 原 daemon 的 `history`、`SessionStore` turn lock、`LoopEngine` 和 `active` map 都是全局单例；`session.new` 在任意活动请求存在时直接返回 `-32001`，因此多个窗口无法独立运行。
+- 运行时现改为 `SessionRuntime`：每个 session ID 对应固定 JSONL 路径、独立内存 history、turn lock 和 engine；共享的 provider/tools/context 只读复用。
+- 活动请求键改为 `(session_id, request_id)`，快照、取消、订阅和待审批按 session 过滤；TUI、REPL、ACP 在 chat/slash/subscribe/cancel 请求中显式携带 session ID。
+- 为兼容旧客户端保留无 session ID 的“legacy session”选择；新窗口不再接回其它窗口的活动请求，也不等待其它 session 的 turn lock。
+- 首次验证发现新 session 创建若复用 workspace current pointer，会在另一个 session 活动时改变共享写入路径；已改为隔离创建并仅更新 daemon 内存中的 legacy session 选择，避免串写。
+- 首次多 session 并发测试直接断言历史条数时遇到 append 尚未 flush 的时序；改为短轮询快照后再断言，生产代码未增加等待。
+- 一次定向验证误把两个过滤器同时传给 `cargo test`，Cargo 在编译前拒绝；随后按项目既有规则改跑单个过滤器/全量 `--all-targets`，未影响生产代码。

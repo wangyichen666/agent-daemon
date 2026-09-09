@@ -57,7 +57,7 @@ where
     Ok(())
 }
 
-pub async fn run_repl(client: &DaemonClient) -> Result<()> {
+pub async fn run_repl(client: &DaemonClient, session_id: &mut String) -> Result<()> {
     println!("my-agent 已连接 daemon，并创建了新会话。输入 /resume 恢复历史，/help 查看命令。");
     loop {
         print!("> ");
@@ -75,19 +75,22 @@ pub async fn run_repl(client: &DaemonClient) -> Result<()> {
             continue;
         }
         if input.starts_with('/') {
-            if run_slash(client, input).await? {
+            if run_slash(client, input, session_id).await? {
                 break;
             }
         } else {
-            run_chat(client, input).await?;
+            run_chat(client, input, session_id).await?;
         }
     }
     Ok(())
 }
 
-pub async fn run_chat(client: &DaemonClient, input: &str) -> Result<()> {
+pub async fn run_chat(client: &DaemonClient, input: &str, session_id: &str) -> Result<()> {
     let mut stream = client
-        .request("chat.send", json!({"message": input}))
+        .request(
+            "chat.send",
+            json!({"message": input, "session_id": session_id}),
+        )
         .await?;
     let request_id = stream.request_id().clone();
     let mut printed_text = false;
@@ -97,7 +100,7 @@ pub async fn run_chat(client: &DaemonClient, input: &str) -> Result<()> {
             frame = stream.next() => frame,
             interrupt = tokio::signal::ctrl_c(), if !cancellation_sent => {
                 interrupt.context("监听 Ctrl-C 失败")?;
-                cancel_request(client, &request_id).await?;
+                cancel_request(client, &request_id, session_id).await?;
                 cancellation_sent = true;
                 eprintln!("\n正在取消本轮……");
                 continue;
@@ -178,8 +181,13 @@ fn print_session_list(sessions: &[crate::session::SessionInfo]) {
     }
 }
 
-async fn run_slash(client: &DaemonClient, line: &str) -> Result<bool> {
-    let value = request_result(client, "slash.execute", json!({"line": line})).await?;
+async fn run_slash(client: &DaemonClient, line: &str, session_id: &mut String) -> Result<bool> {
+    let value = request_result(
+        client,
+        "slash.execute",
+        json!({"line": line, "session_id": session_id}),
+    )
+    .await?;
     let mut response: SlashResponse =
         serde_json::from_value(value).context("daemon slash.execute 格式无效")?;
     loop {
@@ -208,7 +216,10 @@ async fn run_slash(client: &DaemonClient, line: &str) -> Result<bool> {
                 let value = request_result(
                     client,
                     "slash.execute",
-                    json!({"line": format!("/resume {answer}")}),
+                    json!({
+                        "line": format!("/resume {answer}"),
+                        "session_id": session_id,
+                    }),
                 )
                 .await?;
                 response = serde_json::from_value(value)
@@ -217,6 +228,7 @@ async fn run_slash(client: &DaemonClient, line: &str) -> Result<bool> {
             SlashResponse::SessionChanged { message, snapshot } => {
                 println!("{message}");
                 let snapshot = recovery::parse_snapshot(snapshot, "slash.execute")?;
+                *session_id = snapshot.session_id.clone();
                 for message in snapshot.messages {
                     let Some(content) = message.content else {
                         continue;
@@ -233,10 +245,18 @@ async fn run_slash(client: &DaemonClient, line: &str) -> Result<bool> {
     }
 }
 
-async fn cancel_request(client: &DaemonClient, request_id: &RequestId) -> Result<()> {
-    request_result(client, "agent.cancel", json!({"request_id": request_id}))
-        .await
-        .map(|_| ())
+async fn cancel_request(
+    client: &DaemonClient,
+    request_id: &RequestId,
+    session_id: &str,
+) -> Result<()> {
+    request_result(
+        client,
+        "agent.cancel",
+        json!({"request_id": request_id, "session_id": session_id}),
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn respond_to_approval(client: &DaemonClient, data: &Value) -> Result<()> {

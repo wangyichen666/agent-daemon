@@ -536,6 +536,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn independent_sessions_run_and_snapshot_without_blocking_each_other() {
+        let (state, session_path) = state_with_provider(Arc::new(PendingProvider)).await;
+        let client = InMemoryServer::start(state);
+
+        async fn new_session(client: &DaemonClient) -> String {
+            let value = crate::entry::cli::request_result(client, "session.new", json!({}))
+                .await
+                .unwrap();
+            value["session_id"].as_str().unwrap().to_owned()
+        }
+
+        let first_session = new_session(&client).await;
+        let second_session = new_session(&client).await;
+        assert_ne!(first_session, second_session);
+
+        let mut first = client
+            .request(
+                "chat.send",
+                json!({"message": "第一个窗口", "session_id": first_session}),
+            )
+            .await
+            .unwrap();
+        let first_request = first.request_id().clone();
+        let mut second = client
+            .request(
+                "chat.send",
+                json!({"message": "第二个窗口", "session_id": second_session}),
+            )
+            .await
+            .unwrap();
+        let second_request = second.request_id().clone();
+
+        for stream in [&mut first, &mut second] {
+            let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                frame,
+                ServerFrame::Event(event) if event.event == EventKind::TurnStarted
+            ));
+        }
+
+        for session_id in [&first_session, &second_session] {
+            let mut snapshot = Value::Null;
+            for _ in 0..100 {
+                snapshot = crate::entry::cli::request_result(
+                    &client,
+                    "session.load",
+                    json!({"session_id": session_id}),
+                )
+                .await
+                .unwrap();
+                if snapshot["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.len() == 1)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(snapshot["active_requests"].as_array().unwrap().len(), 1);
+            assert_eq!(snapshot["messages"].as_array().unwrap().len(), 1);
+        }
+
+        let new_session = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::entry::cli::request_result(&client, "session.new", json!({})),
+        )
+        .await
+        .expect("新窗口不应等待其它窗口的活动 turn")
+        .unwrap();
+        assert!(new_session["created"].as_bool().unwrap());
+
+        for (request_id, session_id) in [
+            (&first_request, &first_session),
+            (&second_request, &second_session),
+        ] {
+            let cancelled = crate::entry::cli::request_result(
+                &client,
+                "agent.cancel",
+                json!({"request_id": request_id, "session_id": session_id}),
+            )
+            .await
+            .unwrap();
+            assert!(cancelled["cancelled"].as_bool().unwrap());
+        }
+        for stream in [&mut first, &mut second] {
+            let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Some(ServerFrame::Response(response)) = stream.next().await {
+                        break response;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(terminal.error.unwrap().code, -32800);
+        }
+
+        for session_id in [first_session, second_session] {
+            let _ = std::fs::remove_file(session_path.with_file_name(session_id));
+        }
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[tokio::test]
     async fn cancels_an_active_turn_by_request_id() {
         let (state, session_path) = state_with_provider(Arc::new(PendingProvider)).await;
         let client = InMemoryServer::start(state);

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
+use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use tokio::sync::{Notify, mpsc};
 use tracing::{debug, warn};
@@ -12,7 +13,7 @@ use crate::context::ContextManager;
 use crate::provider::{Message, Provider, Response, Role, ToolCall};
 use crate::session::SessionStore;
 use crate::tool_calls::ToolCallAssembler;
-use crate::tools::{ToolOutput, ToolRegistry};
+use crate::tools::{ToolCancellation, ToolOutput, ToolRegistry};
 
 pub const DEFAULT_MAX_ROUNDS: usize = 50;
 const REPETITION_THRESHOLD: usize = 3;
@@ -74,6 +75,18 @@ impl CancellationToken {
     }
 }
 
+#[async_trait]
+impl ToolCancellation for CancellationToken {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+
+    async fn cancelled(&self) {
+        self.cancelled().await;
+    }
+}
+
+#[derive(Clone)]
 pub struct LoopEngine {
     provider: Arc<dyn Provider>,
     tools: ToolRegistry,
@@ -110,6 +123,16 @@ impl LoopEngine {
             context,
             session: None,
             max_rounds,
+        }
+    }
+
+    pub fn for_session(&self, session: Arc<SessionStore>) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            tools: self.tools.clone(),
+            context: self.context.clone(),
+            session: Some(session),
+            max_rounds: self.max_rounds,
         }
     }
 
@@ -186,7 +209,7 @@ impl LoopEngine {
                     }
                     self.record(history, Message::assistant_tool_calls(calls.clone()))
                         .await?;
-                    let execute = self.execute_in_waves(&calls, events.clone());
+                    let execute = self.execute_in_waves(&calls, events.clone(), &cancellation);
                     tokio::pin!(execute);
                     let results = tokio::select! {
                         results = &mut execute => results,
@@ -274,6 +297,7 @@ impl LoopEngine {
         &self,
         calls: &[ToolCall],
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
+        cancellation: &CancellationToken,
     ) -> Vec<ToolExecution> {
         let mut results = Vec::with_capacity(calls.len());
         let mut cursor = 0;
@@ -286,7 +310,7 @@ impl LoopEngine {
                 let batch = stream::iter(calls[cursor..end].to_vec())
                     .map(|call: ToolCall| {
                         let events = events.clone();
-                        async move { self.execute_one(&call, events).await }
+                        async move { self.execute_one(&call, events, cancellation).await }
                     })
                     .buffered(8)
                     .collect::<Vec<ToolExecution>>()
@@ -294,7 +318,10 @@ impl LoopEngine {
                 results.extend(batch);
                 cursor = end;
             } else {
-                results.push(self.execute_one(&calls[cursor], events.clone()).await);
+                results.push(
+                    self.execute_one(&calls[cursor], events.clone(), cancellation)
+                        .await,
+                );
                 cursor += 1;
             }
         }
@@ -305,6 +332,7 @@ impl LoopEngine {
         &self,
         call: &ToolCall,
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
+        cancellation: &CancellationToken,
     ) -> ToolExecution {
         emit(
             &events,
@@ -313,7 +341,11 @@ impl LoopEngine {
                 name: call.name.clone(),
             },
         );
-        let result = match self.tools.execute(&call.name, call.arguments.clone()).await {
+        let result = match self
+            .tools
+            .execute_with_cancellation(&call.name, call.arguments.clone(), cancellation)
+            .await
+        {
             Ok(output) => output,
             Err(error) => {
                 warn!(tool = %call.name, %error, "工具执行失败，将错误回填给模型");

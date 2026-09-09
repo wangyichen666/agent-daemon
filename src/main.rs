@@ -126,11 +126,12 @@ async fn run_chat_command(workspace: &Path, prompt: Vec<String>) -> Result<()> {
     let paths = RuntimePaths::for_workspace(workspace)?;
     paths.ensure_daemon(workspace).await?;
     let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-    entry::recovery::start_new_session(&client).await?;
+    let snapshot = entry::recovery::start_new_session(&client).await?;
+    let mut session_id = snapshot.session_id;
     if prompt.is_empty() {
-        run_repl(&client).await
+        run_repl(&client, &mut session_id).await
     } else {
-        run_chat(&client, &prompt.join(" ")).await
+        run_chat(&client, &prompt.join(" "), &session_id).await
     }
 }
 

@@ -44,6 +44,7 @@ pub struct SessionInfo {
 pub struct SessionStore {
     base_path: PathBuf,
     current_path: RwLock<PathBuf>,
+    current_id_cache: std::sync::RwLock<String>,
     turn_lock: Mutex<()>,
 }
 
@@ -62,21 +63,32 @@ impl SessionStore {
         let base_path = path.into();
         let current_path =
             Self::read_current_pointer(&base_path).unwrap_or_else(|| base_path.clone());
+        let current_id = current_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session.jsonl")
+            .to_owned();
         Self {
             base_path,
             current_path: RwLock::new(current_path),
+            current_id_cache: std::sync::RwLock::new(current_id),
             turn_lock: Mutex::new(()),
         }
     }
 
+    #[cfg(test)]
     pub async fn current_id(&self) -> String {
-        self.current_path
+        self.current_id_cache
             .read()
-            .await
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("session.jsonl")
-            .to_owned()
+            .expect("session current id lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn current_id_sync(&self) -> String {
+        self.current_id_cache
+            .read()
+            .expect("session current id lock poisoned")
+            .clone()
     }
 
     pub async fn lock_turn(&self) -> MutexGuard<'_, ()> {
@@ -227,6 +239,7 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    #[cfg(test)]
     pub async fn start_new(&self) -> Result<String> {
         let _guard = self.turn_lock.lock().await;
         let id = self.new_session_id()?;
@@ -237,9 +250,14 @@ impl SessionStore {
             .join(&id);
         self.persist_current_pointer(&id).await?;
         *self.current_path.write().await = path;
+        *self
+            .current_id_cache
+            .write()
+            .expect("session current id lock poisoned") = id.clone();
         Ok(id)
     }
 
+    #[cfg(test)]
     pub async fn resume(&self, session_id: &str) -> Result<Vec<Message>> {
         if Path::new(session_id).file_name() != Some(OsStr::new(session_id))
             || !Self::is_session_name(&self.base_path, session_id)
@@ -261,7 +279,67 @@ impl SessionStore {
         let history = Self::load_path(&target).await?;
         self.persist_current_pointer(session_id).await?;
         *self.current_path.write().await = target;
+        *self
+            .current_id_cache
+            .write()
+            .expect("session current id lock poisoned") = session_id.to_owned();
         Ok(history)
+    }
+
+    /// Open an existing session without changing the workspace-wide current pointer.
+    /// This is the primitive used by concurrent TUI/editor windows.
+    pub fn open_session(&self, session_id: &str) -> Result<Self> {
+        self.validate_session_id(session_id)?;
+        let target = self.session_path(session_id);
+        let exists =
+            std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_file());
+        if !exists && self.current_id_sync() != session_id {
+            return Err(SessionError::UnknownSession(session_id.to_owned()).into());
+        }
+        Ok(Self::with_current_path(self.base_path.clone(), target))
+    }
+
+    /// Allocate a fresh session without touching the workspace-wide current
+    /// pointer. This path is safe while another window is actively writing the
+    /// default session.
+    pub fn create_isolated_session(&self) -> Result<(String, Self)> {
+        let id = self.new_session_id()?;
+        let target = self.session_path(&id);
+        Ok((id, Self::with_current_path(self.base_path.clone(), target)))
+    }
+
+    fn with_current_path(base_path: PathBuf, current_path: PathBuf) -> Self {
+        let current_id = current_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session.jsonl")
+            .to_owned();
+        Self {
+            base_path,
+            current_path: RwLock::new(current_path),
+            current_id_cache: std::sync::RwLock::new(current_id),
+            turn_lock: Mutex::new(()),
+        }
+    }
+
+    fn session_path(&self, session_id: &str) -> PathBuf {
+        self.base_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(session_id)
+    }
+
+    pub(crate) fn path_for_session(&self, session_id: &str) -> PathBuf {
+        self.session_path(session_id)
+    }
+
+    fn validate_session_id(&self, session_id: &str) -> Result<()> {
+        if Path::new(session_id).file_name() != Some(OsStr::new(session_id))
+            || !Self::is_session_name(&self.base_path, session_id)
+        {
+            return Err(SessionError::InvalidSessionId(session_id.to_owned()).into());
+        }
+        Ok(())
     }
 
     fn new_session_id(&self) -> Result<String> {
@@ -328,6 +406,7 @@ impl SessionStore {
             .then_some(candidate)
     }
 
+    #[cfg(test)]
     async fn persist_current_pointer(&self, session_id: &str) -> Result<()> {
         let pointer = Self::pointer_path(&self.base_path);
         if let Some(parent) = pointer.parent() {

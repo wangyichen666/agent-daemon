@@ -111,6 +111,7 @@ impl TuiThemeMode {
 }
 
 struct TuiState {
+    session_id: String,
     messages: Vec<UiMessage>,
     next_message_id: u64,
     input: InputEditor,
@@ -138,6 +139,7 @@ impl TuiState {
         let has_pending = !snapshot.pending_approvals.is_empty();
         let next_message_id = snapshot.messages.len() as u64 + 1;
         Self {
+            session_id: snapshot.session_id,
             messages: snapshot
                 .messages
                 .into_iter()
@@ -174,6 +176,7 @@ impl TuiState {
     }
 
     fn replace_snapshot(&mut self, snapshot: recovery::RecoverySnapshot) {
+        self.session_id = snapshot.session_id;
         self.messages = snapshot
             .messages
             .into_iter()
@@ -355,7 +358,7 @@ pub async fn run_tui(client: DaemonClient, workspace: &std::path::Path) -> Resul
     let session_id = snapshot.session_id.clone();
     let mut state = TuiState::from_snapshot(snapshot);
     for request_id in std::mem::take(&mut state.recovery_active_requests) {
-        match recovery::subscribe(&client, &request_id).await {
+        match recovery::subscribe_for_session(&client, &request_id, &session_id).await {
             Ok(stream) => state.active_turns.push(ActiveTurn { request_id, stream }),
             Err(error) => state.status = format!("恢复活动请求失败：{error:#}"),
         }
@@ -544,7 +547,7 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
             let _ = crate::entry::cli::request_result(
                 client,
                 "agent.cancel",
-                json!({"request_id": request_id}),
+                json!({"request_id": request_id, "session_id": state.session_id}),
             )
             .await?;
             state.status = "已发送取消请求".to_owned();
@@ -712,7 +715,10 @@ async fn start_next_turn(client: &DaemonClient, state: &mut TuiState) -> Result<
 
 async fn begin_turn(client: &DaemonClient, state: &mut TuiState, message: String) -> Result<()> {
     let stream = client
-        .request("chat.send", json!({"message": message}))
+        .request(
+            "chat.send",
+            json!({"message": message, "session_id": state.session_id}),
+        )
         .await?;
     let request_id = stream.request_id().clone();
     state.active_turns.push(ActiveTurn { request_id, stream });
@@ -725,8 +731,12 @@ async fn begin_turn(client: &DaemonClient, state: &mut TuiState, message: String
 }
 
 async fn execute_slash(client: &DaemonClient, state: &mut TuiState, line: &str) -> Result<()> {
-    let value =
-        crate::entry::cli::request_result(client, "slash.execute", json!({"line": line})).await?;
+    let value = crate::entry::cli::request_result(
+        client,
+        "slash.execute",
+        json!({"line": line, "session_id": state.session_id}),
+    )
+    .await?;
     let response: SlashResponse =
         serde_json::from_value(value).context("daemon slash.execute 格式无效")?;
     match response {

@@ -11,14 +11,14 @@
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
 - `.my-agent/skills/*.md` 使用 YAML frontmatter 与 semver；元数据常驻索引，正文按需加载，支持相关性稳定排序及 `/skill` 本地安装、更新、删除。
 - 三条记忆链路：append-only 会话、60%/85% 两级上下文摘要、TTL 长期记忆。
-- 每次启动 TUI 或 REPL 都创建空白 session；历史会话保留稳定 ID，可用 `/resume` 查看摘要并按编号或 ID 恢复。
+- 每个 TUI/REPL/ACP 窗口启动时都创建并持有独立的空白 session；同一台电脑可以同时运行多个窗口，活动请求、历史、审批和取消互不阻塞或串线。历史会话保留稳定 ID，可用 `/resume` 查看摘要并按编号或 ID 恢复。
 - JSON Schema 参数校验、统一路径边界、灾难命令硬拒、跨工作区写入和高风险命令审批。
 - 同轮连续只读工具最多 8 路并行，副作用工具串行；连续三次完全相同的工具调用与结果只做软提醒。
 - 显式按 request id 取消；不使用挂钟超时强杀正在执行的 turn。
 - daemon 使用工作区稳定哈希隔离 socket/PID/ready/log；启动探测、并发启动锁、失效标记清理和最后客户端断开后的空闲退出均已实现。
 - 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；同一服务的 `/ws` 提供全双工 JSON-RPC、事件流和交互审批；非回环监听必须配置 Bearer Token。
 - 编辑器入口实现标准 ACP v1（`agent-client-protocol`），支持 initialize、session/new/load、prompt、cancel、工具更新和 typed 权限请求。
-- 连接断开后可恢复：daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；ACP `session/load` 与 WebSocket 重连可继续消费，不会因断线自动批准或拒绝。
+- 连接断开后可恢复：daemon 按 session 保留活动 turn、待审批和最多 1 MiB 事件回放；ACP `session/load` 与 WebSocket 重连可继续消费，不会因断线自动批准或拒绝。
 - 本地 Cron：`.my-agent/cron.json` 原子持久化 interval/五段 cron 任务，使用独立 session、有限指数退避和无人值守安全拒绝；可选 heartbeat 不调用模型。
 - MCP stdio 客户端：从 `.my-agent/mcp.json` 启动并握手本地 server，将发现的工具动态桥接为 `mcp__<server>__<tool>`；配置/server 错误隔离，调用默认审批，daemon 退出时清理子进程。
 
@@ -132,6 +132,7 @@ export MODEL_NAME='你的模型名'
 | `MY_AGENT_API_TOKEN` | 未设置 | HTTP Bearer Token；非回环监听必填 |
 | `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；`terminal` 继承终端颜色，`dark`/`light` 使用内置语义色板 |
 | `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 后开启 crossterm 鼠标滚轮捕获 |
+| `MY_AGENT_EXEC_TIMEOUT_SECS` | `300` | `exec` 工具单次命令最长运行秒数；取消或超时会清理整个子进程组 |
 | `RUST_LOG` | `warn` | tracing 日志过滤 |
 
 ## 使用
@@ -161,7 +162,7 @@ curl http://127.0.0.1:8787/health
 ./target/release/my-agent editor
 ```
 
-TUI 和 REPL 每次启动都会进入一个全新空白 session，不会自动显示旧对话。输入 `/resume` 可查看带编号、消息数和首条问题摘要的历史列表；输入编号或 `/resume <session-id>` 即可恢复。`/help` 从共享注册表自动生成，另有 `/status`、`/sessions`、`/new`、`/cancel`、`/skill`、`/cron`、`/mcp`、`/ping`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
+TUI 和 REPL 每次启动都会进入一个全新空白 session，不会自动显示旧对话；多个窗口可并行运行，互不抢占 session。输入 `/resume` 可查看带编号、消息数和首条问题摘要的历史列表；输入编号或 `/resume <session-id>` 即可恢复。`/help` 从共享注册表自动生成，另有 `/status`、`/sessions`、`/new`、`/cancel`、`/skill`、`/cron`、`/mcp`、`/ping`、`/exit`。运行中的 turn 按 Ctrl-C 会发送带 session 范围的 `agent.cancel`，不会直接杀掉 daemon。
 
 Cron 示例：
 

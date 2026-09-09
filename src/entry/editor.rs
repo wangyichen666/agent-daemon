@@ -171,7 +171,13 @@ fn build_acp_agent(client: DaemonClient, workspace: PathBuf) -> impl ConnectTo<A
                     }
                     let session_key = request.session_id.to_string();
                     let stream = match client
-                        .request("chat.send", json!({"message": message}))
+                        .request(
+                            "chat.send",
+                            json!({
+                                "message": message,
+                                "session_id": request.session_id.to_string(),
+                            }),
+                        )
                         .await
                     {
                         Ok(stream) => stream,
@@ -211,7 +217,10 @@ fn build_acp_agent(client: DaemonClient, workspace: PathBuf) -> impl ConnectTo<A
                     crate::entry::cli::request_result(
                         &cancel_client,
                         "agent.cancel",
-                        json!({"request_id": request_id}),
+                        json!({
+                            "request_id": request_id,
+                            "session_id": notification.session_id.to_string(),
+                        }),
                     )
                     .await
                     .map_err(internal_error)?;
@@ -247,10 +256,16 @@ async fn run_acp_slash(
         }) if matches!(args.as_slice(), [command] if command == "list" || command == "status")
     );
     let content = if allowed {
-        let value =
-            crate::entry::cli::request_result(client, "slash.execute", json!({"line": line}))
-                .await
-                .map_err(internal_error)?;
+        let value = crate::entry::cli::request_result(
+            client,
+            "slash.execute",
+            json!({
+                "line": line,
+                "session_id": session_id.to_string(),
+            }),
+        )
+        .await
+        .map_err(internal_error)?;
         let response: SlashResponse = serde_json::from_value(value)
             .map_err(|error| internal_error(anyhow::Error::from(error)))?;
         render_acp_slash_response(response)
@@ -500,7 +515,7 @@ async fn start_active_subscriptions(
     ignored_approvals: HashSet<String>,
 ) -> Result<(), AcpError> {
     for request_id in active_requests {
-        let stream = recovery::subscribe(client, request_id)
+        let stream = recovery::subscribe_for_session(client, request_id, &session_id.to_string())
             .await
             .map_err(internal_error)?;
         let task_client = client.clone();

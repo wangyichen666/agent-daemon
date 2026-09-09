@@ -1807,6 +1807,7 @@ dependencies = [
  "cron",
  "crossterm",
  "futures-util",
+ "libc",
  "lopdf",
  "ratatui",
  "reqwest",

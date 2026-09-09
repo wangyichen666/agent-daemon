@@ -128,3 +128,7 @@
 - TUI 阶段 3–8 完成：InputEditor、滚动/follow-bottom/可选鼠标、版本化换行缓存、FIFO 队列、活动 turn/审批集合和 terminal/dark/light 语义主题均已落地；恢复快照不再用 `.first()` 丢弃并发项。
 - TUI 阶段 9 完成：README 与 HTML 已同步；全量 103/103 测试、格式、严格 Clippy 与 release 构建通过。
 - 最终补充验收：新增主题 render 覆盖后全量 104/104 测试、格式、严格 Clippy 与 release 构建仍全绿；在隔离临时工作区以 Ollama 占位配置真实启动 release TUI，确认初始界面绘制、Esc 退出及 alternate-screen/raw-mode 恢复均正常。未发起模型请求；临时工作区已移入废纸篓，可恢复。
+- 2026-09-09 开始修复“每个窗口一个独立 session”：新增 SessionRuntime、按 `(session_id, request_id)` 隔离活动请求，TUI/REPL/ACP 显式传递 session_id，session.new 不再因其它窗口活动 turn 返回 -32001。
+- 首次 ACP 恢复测试因新 session 尚无 JSONL 文件被错误拒绝；open_session 已允许当前新建的空 session，恢复链路重新通过。
+- 首次并发测试发现 snapshot 读取可能早于 user append flush；测试改为短轮询，生产路径继续保持 append-only flush 后可恢复。
+- 多窗口实现阶段验收：`cargo test --all-targets` 106/106 通过，严格 Clippy 通过；待完成 fmt、release、安装并验证 `myagent`。

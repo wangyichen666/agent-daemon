@@ -21,16 +21,29 @@ use crate::session::SessionStore;
 use crate::skills::SkillLibrary;
 
 pub struct DaemonState {
-    pub(crate) engine: Arc<LoopEngine>,
-    pub(crate) history: Mutex<Vec<Message>>,
     pub(crate) session: Arc<SessionStore>,
-    pub(crate) session_switch: Mutex<()>,
+    pub(crate) legacy_session_id: Mutex<String>,
+    pub(crate) default_session: Arc<SessionRuntime>,
+    pub(crate) sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub(crate) approvals: ApprovalBroker,
-    pub(crate) active: Mutex<HashMap<RequestId, ActiveRequest>>,
+    pub(crate) active: Mutex<HashMap<ActiveKey, ActiveRequest>>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) skills: Option<SkillLibrary>,
     pub(crate) cron: Option<Arc<CronManager>>,
     pub(crate) mcp: Option<Arc<McpManager>>,
+}
+
+pub(crate) struct SessionRuntime {
+    pub(crate) id: String,
+    pub(crate) engine: Arc<LoopEngine>,
+    pub(crate) history: Mutex<Vec<Message>>,
+    pub(crate) store: Arc<SessionStore>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ActiveKey {
+    pub(crate) session_id: String,
+    pub(crate) request_id: RequestId,
 }
 
 const ACTIVE_REPLAY_BYTES: usize = 1024 * 1024;
@@ -140,11 +153,18 @@ impl DaemonState {
         cron: Option<Arc<CronManager>>,
         mcp: Option<Arc<McpManager>>,
     ) -> Self {
-        Self {
+        let default_session_id = session.current_id_sync();
+        let default_session = Arc::new(SessionRuntime {
+            id: default_session_id.clone(),
             engine,
             history: Mutex::new(history),
+            store: session.clone(),
+        });
+        Self {
             session,
-            session_switch: Mutex::new(()),
+            legacy_session_id: Mutex::new(default_session_id),
+            default_session,
+            sessions: Mutex::new(HashMap::new()),
             approvals,
             active: Mutex::new(HashMap::new()),
             shutdown: CancellationToken::new(),

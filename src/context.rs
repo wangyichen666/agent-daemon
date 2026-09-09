@@ -52,6 +52,7 @@ impl ContextConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct ContextManager {
     provider: Arc<dyn Provider>,
     workspace: PathBuf,
