@@ -99,3 +99,26 @@
 - S3 完成：TUI/REPL 启动显式 `session.new`；TUI `/resume` 显示编号、消息数、当前标记和首条问题摘要，支持直接输入编号或 `/resume <编号|ID>`；`/new`、`/status`、`/help` 同步接入。ACP `session/load` 也改为按请求 ID 切换，并保留活动当前 session 的重连订阅。
 - S4 验收：64/64 全量测试、严格 Clippy、release、fmt 和 diff check 全绿；隔离 PTY 连续两次启动生成不同 session ID。桌面/仓库 HTML 逐字节一致，旧 daemon 经确认 active=0、pending=0 后已优雅停止，下次 `myagent` 会自动启动新版本。
 - 最终并发审计增加 `session_switch` 锁，使 load/new/resume 快照互斥；跨 session 切换仍同时持有 active/history/turn 锁，活动当前 session 的只读恢复不受影响。补丁后再次完成 64/64、Clippy、release 与格式全套验证。
+
+## 六项通用能力补齐（2026-09-09）
+
+- 已读取完整需求与 planning-with-files 技能说明。
+- 技能引用的模板目录缺失；已保留仓库既有规划历史并追加本轮计划。
+- 当前阶段：0，源码基线与现状确认清单；尚未修改业务代码。
+- 已审阅 provider/config/loop_engine/tool registry/safety：确认 provider 目前拥有 arguments 拼接与 JSON 解析，agent 侧无 canonical assembler；schema 校验在 ToolRegistry，安全审批在具体工具链路。
+- 已审阅 CLI/TUI slash、SkillLibrary、daemon handler、sub-agent 与 PlanStore：确认 slash 平行实现、skill 元数据/排序现状、daemon 生命周期挂载点及原子写法。
+- 已审阅 ContextManager、SessionStore、daemon server/lifecycle/runtime：确认 provider capability、后台任务退出与 cron 独立会话需要新增明确所有权。
+- 阶段 0 完成：基线 `cargo test --all-targets` 64/64 通过；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 通过。
+- 当前进入阶段 1：多 Provider 协议。
+- 已加入统一 ApiType/capability/execution identity/ProviderEvent 契约、OpenAI/Anthropic/Ollama wire 适配及 agent 侧 canonical assembler；首次 check 的一个类型推断错误和两个 unused import 已聚焦修正。
+- 多 provider/装配重构后 73/73 测试通过；严格 Clippy 仅剩一项风格告警并已修正。
+- 项目一与二完成：三协议本地 HTTP mock 闭环、identity 隔离、纯增量/快照规则、整轮 fail-closed 与边界护栏已覆盖；79/79 测试、严格 Clippy、fmt 全绿。
+- 当前进入项目三：共享 Slash 命令注册表。
+- 项目三完成：共享注册表、daemon `slash.execute`、CLI/TUI/ACP 投影及自动 help 已落地；80/80 测试、严格 Clippy、fmt 全绿。
+- 当前进入项目四：版本化 Skill 与本地安装器。
+- 项目四完成：结构化 frontmatter、semver、本地安装/更新/确认删除、共享索引与稳定相关性排序已落地；84/84 测试、严格 Clippy、fmt 全绿。
+- 当前进入项目五：Cron + Heartbeat。
+- 项目五完成：cron.json 原子持久化、interval/五段 cron、独立 session、有限退避重试、无人值守拒绝审批、可选无模型 heartbeat、daemon 生命周期和 `/cron` 主路径均已落地；89/89、严格 Clippy、fmt 全绿。
+- 当前进入项目六：自研 MCP stdio 客户端。
+- 项目六完成：`.my-agent/mcp.json` 双层错误隔离、占位符边界、stdio 双 framing、initialize/tools/list/call、动态 schema 工具桥接、默认审批、安全命令/路径检查、reload 与进程清理均已落地；97/97 全量测试、release、严格 Clippy、fmt 全绿。
+- 阶段 7 完成：README/HTML/规划记录已同步，最终质量门禁全部通过，当前六项能力补齐任务完成。

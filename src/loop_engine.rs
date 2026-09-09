@@ -9,8 +9,9 @@ use tokio::sync::{Notify, mpsc};
 use tracing::{debug, warn};
 
 use crate::context::ContextManager;
-use crate::provider::{Message, Provider, ProviderEvent, Response, Role, ToolCall};
+use crate::provider::{Message, Provider, Response, Role, ToolCall};
 use crate::session::SessionStore;
+use crate::tool_calls::ToolCallAssembler;
 use crate::tools::{ToolOutput, ToolRegistry};
 
 pub const DEFAULT_MAX_ROUNDS: usize = 50;
@@ -134,7 +135,12 @@ impl LoopEngine {
         emit(&events, AgentEvent::TurnStarted);
         self.record(history, Message::text(Role::User, input))
             .await?;
-        let specs = self.tools.specs();
+        let capabilities = self.provider.capabilities();
+        let specs = if capabilities.tools {
+            self.tools.specs()
+        } else {
+            Vec::new()
+        };
         let mut transient_messages = Vec::new();
         let mut repeat_detector = RepeatDetector::default();
         let mut repetition_reminder = false;
@@ -163,6 +169,21 @@ impl LoopEngine {
                     return Ok(text);
                 }
                 Response::ToolCalls(calls) => {
+                    if let Err(error) = self.tools.admit_all(&calls) {
+                        self.record(
+                            history,
+                            Message::text(
+                                Role::System,
+                                format!(
+                                    "[tool_call_admission_error:{}] {}。本轮没有执行任何工具；请修正全部调用后重试。",
+                                    error.code(),
+                                    error
+                                ),
+                            ),
+                        )
+                        .await?;
+                        continue;
+                    }
                     self.record(history, Message::assistant_tool_calls(calls.clone()))
                         .await?;
                     let execute = self.execute_in_waves(&calls, events.clone());
@@ -179,6 +200,20 @@ impl LoopEngine {
                         }
                     }
                 }
+                Response::ToolAssemblyFailed(error) => {
+                    warn!(code = %error.code, message = %error.message, "工具调用装配失败，整轮拒绝");
+                    self.record(
+                        history,
+                        Message::text(
+                            Role::System,
+                            format!(
+                                "[tool_call_assembly_error:{}] {}。本轮没有执行任何工具；请重新生成完整且合法的工具调用。",
+                                error.code, error.message
+                            ),
+                        ),
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -192,27 +227,39 @@ impl LoopEngine {
         events: &Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
     ) -> Result<Response> {
+        let request_messages;
+        let messages = if self.provider.capabilities().images {
+            messages
+        } else {
+            request_messages = without_images(messages);
+            &request_messages
+        };
         let (provider_events, mut provider_rx) = mpsc::unbounded_channel();
-        let request = self
-            .provider
-            .chat_stream(messages, specs, Some(provider_events));
+        let request = self.provider.chat_stream(messages, specs, provider_events);
         tokio::pin!(request);
-
-        let response = loop {
+        let mut assembler = ToolCallAssembler::default();
+        loop {
             tokio::select! {
-                response = &mut request => break response?,
+                response = &mut request => {
+                    response?;
+                    break;
+                },
                 event = provider_rx.recv() => {
-                    if let Some(ProviderEvent::TextDelta(delta)) = event {
+                    if let Some(event) = event
+                        && let Some(delta) = assembler.accept(event)
+                    {
                         emit(events, AgentEvent::TextDelta(delta));
                     }
                 }
                 _ = cancellation.cancelled() => bail!("请求已取消"),
             }
-        };
-        while let Ok(ProviderEvent::TextDelta(delta)) = provider_rx.try_recv() {
-            emit(events, AgentEvent::TextDelta(delta));
         }
-        Ok(response)
+        while let Ok(event) = provider_rx.try_recv() {
+            if let Some(delta) = assembler.accept(event) {
+                emit(events, AgentEvent::TextDelta(delta));
+            }
+        }
+        Ok(assembler.finish())
     }
 
     async fn record(&self, history: &mut Vec<Message>, message: Message) -> Result<()> {
@@ -292,6 +339,27 @@ impl LoopEngine {
             fingerprint,
         }
     }
+}
+
+fn without_images(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            if !message.image_urls.is_empty() {
+                let note = format!(
+                    "[当前 provider 不支持图片，已省略 {} 个图片内容块]",
+                    message.image_urls.len()
+                );
+                message.content = Some(match message.content.take() {
+                    Some(content) if !content.is_empty() => format!("{content}\n{note}"),
+                    _ => note,
+                });
+                message.image_urls.clear();
+            }
+            message
+        })
+        .collect()
 }
 
 fn emit(events: &Option<mpsc::UnboundedSender<AgentEvent>>, event: AgentEvent) {
@@ -452,7 +520,14 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         let tool_result = snapshots[1]
             .iter()
-            .find(|message: &&Message| message.tool_call_id.as_deref() == Some("call-read-1"))
+            .find(|message: &&Message| {
+                message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(crate::provider::outbound_wire_id)
+                    .as_deref()
+                    == Some("call-read-1")
+            })
             .unwrap();
         assert_eq!(tool_result.content.as_deref(), Some("这是 README 内容"));
         let _ = std::fs::remove_file(temp_path);
@@ -512,7 +587,14 @@ mod tests {
         let snapshots = provider.snapshots.lock().unwrap();
         let result = snapshots[1]
             .iter()
-            .find(|message: &&Message| message.tool_call_id.as_deref() == Some("call-exec-1"))
+            .find(|message: &&Message| {
+                message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(crate::provider::outbound_wire_id)
+                    .as_deref()
+                    == Some("call-exec-1")
+            })
             .unwrap();
         assert!(result.content.as_deref().unwrap().contains("exit_code: 0"));
     }
@@ -754,5 +836,153 @@ mod tests {
                 .iter()
                 .any(|spec: &ToolSpec| spec.name == "repeat_probe")
         );
+    }
+
+    struct InvalidArgumentsStream {
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for InvalidArgumentsStream {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            events: tokio::sync::mpsc::UnboundedSender<crate::provider::ProviderEvent>,
+        ) -> Result<()> {
+            use crate::provider::{
+                ApiType, ExecutionIdentity, ProviderEvent, ToolArgumentsFragment,
+            };
+            if self
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                for (wire_id, arguments) in [("first", "{}"), ("broken", "{")] {
+                    let exec_id = ExecutionIdentity::wire(ApiType::OpenaiChat, wire_id);
+                    events.send(ProviderEvent::ToolCallStarted {
+                        exec_id: exec_id.clone(),
+                        name: "side_effect".to_owned(),
+                    })?;
+                    events.send(ProviderEvent::ToolCallDelta {
+                        exec_id: exec_id.clone(),
+                        fragment: ToolArgumentsFragment::Append(arguments.to_owned()),
+                    })?;
+                    events.send(ProviderEvent::ToolCallCompleted { exec_id })?;
+                }
+            } else {
+                events.send(ProviderEvent::TextDelta("已修正".to_owned()))?;
+            }
+            Ok(())
+        }
+    }
+
+    struct SideEffectProbe {
+        name: &'static str,
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for SideEffectProbe {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "原子拒绝测试工具"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            })
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<String> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("executed".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_failure_rejects_the_whole_wave_before_side_effects() {
+        let provider = Arc::new(InvalidArgumentsStream {
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(SideEffectProbe {
+            name: "side_effect",
+            executions: executions.clone(),
+        });
+        let engine = LoopEngine::new(
+            provider.clone(),
+            registry,
+            test_context(provider),
+            test_session("assembly-fail-closed"),
+        );
+        let mut history = Vec::new();
+
+        let answer = engine
+            .run_turn(&mut history, "测试装配失败".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "已修正");
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(history.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("tool_call_assembly_error:invalid_json"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn admission_failure_rejects_all_calls_before_side_effects() {
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from([
+                Response::ToolCalls(vec![
+                    ToolCall {
+                        id: "valid".to_owned(),
+                        name: "first_effect".to_owned(),
+                        arguments: json!({"value": "ok"}),
+                    },
+                    ToolCall {
+                        id: "invalid".to_owned(),
+                        name: "second_effect".to_owned(),
+                        arguments: json!({}),
+                    },
+                ]),
+                Response::Text("已修正".to_owned()),
+            ])),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        for name in ["first_effect", "second_effect"] {
+            registry.register(SideEffectProbe {
+                name,
+                executions: executions.clone(),
+            });
+        }
+        let engine = LoopEngine::new(
+            provider.clone(),
+            registry,
+            test_context(provider),
+            test_session("admission-fail-closed"),
+        );
+
+        let answer = engine
+            .run_turn(&mut Vec::new(), "测试准入失败".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "已修正");
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

@@ -92,6 +92,7 @@ pub async fn run_unix_server(
                 if accepted_any
                     && clients == 0
                     && !state.has_active_turns().await
+                    && !state.has_persistent_background_work().await
                     && idle_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(2))
                 {
                     break;
@@ -105,9 +106,11 @@ pub async fn run_unix_server(
         }
     }
 
+    state.shutdown.cancel();
     while state.has_active_turns().await {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    state.join_background().await;
     paths.cleanup().await;
     Ok(())
 }
@@ -189,13 +192,17 @@ mod tests {
 
     use super::*;
     use crate::context::{ContextConfig, ContextManager};
+    use crate::cron::{CronJob, CronManager, CronStore, ScheduledJobRunner};
     use crate::daemon::approval::ApprovalBroker;
     use crate::daemon::protocol::{EventKind, JsonRpcResponse, RequestId};
     use crate::loop_engine::LoopEngine;
+    use crate::mcp::McpManager;
     use crate::plan::PlanStore;
     use crate::provider::{Message, Provider, Response, ToolSpec};
-    use crate::safety::Approval;
+    use crate::safety::{Approval, SafetyPolicy};
     use crate::session::SessionStore;
+    use crate::skills::SkillLibrary;
+    use crate::slash::SlashResponse;
     use crate::tools::{Tool, ToolRegistry};
 
     static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
@@ -208,6 +215,15 @@ mod tests {
 
     struct ApprovalTool {
         approvals: ApprovalBroker,
+    }
+
+    struct SuccessfulCronRunner;
+
+    #[async_trait]
+    impl ScheduledJobRunner for SuccessfulCronRunner {
+        async fn run(&self, job: &CronJob) -> Result<String> {
+            Ok(format!("完成：{}", job.prompt))
+        }
     }
 
     #[async_trait]
@@ -254,6 +270,22 @@ mod tests {
     async fn state_with_provider(
         provider: Arc<dyn Provider>,
     ) -> (Arc<DaemonState>, std::path::PathBuf) {
+        state_with_provider_and_skills(provider, None).await
+    }
+
+    async fn state_with_provider_and_skills(
+        provider: Arc<dyn Provider>,
+        skills: Option<SkillLibrary>,
+    ) -> (Arc<DaemonState>, std::path::PathBuf) {
+        state_with_provider_and_services(provider, skills, None, None).await
+    }
+
+    async fn state_with_provider_and_services(
+        provider: Arc<dyn Provider>,
+        skills: Option<SkillLibrary>,
+        cron: Option<Arc<CronManager>>,
+        mcp: Option<Arc<McpManager>>,
+    ) -> (Arc<DaemonState>, std::path::PathBuf) {
         let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
         let session_path =
             std::env::temp_dir().join(format!("my-agent-daemon-{}-{id}.jsonl", std::process::id()));
@@ -278,14 +310,110 @@ mod tests {
             session.clone(),
         ));
         (
-            Arc::new(DaemonState::new(
+            Arc::new(DaemonState::new_with_services(
                 engine,
                 Vec::new(),
                 session,
                 ApprovalBroker::new(),
+                skills,
+                cron,
+                mcp,
             )),
             session_path,
         )
+    }
+
+    #[tokio::test]
+    async fn slash_cron_commands_share_persistent_store_and_runner() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let workspace =
+            std::env::temp_dir().join(format!("my-agent-slash-cron-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = Arc::new(CronStore::load(&workspace).await.unwrap());
+        let cron = Arc::new(CronManager::new(
+            store,
+            Arc::new(SuccessfulCronRunner),
+            Duration::from_secs(60),
+            Duration::ZERO,
+            None,
+        ));
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::new()),
+        });
+        let (state, session_path) =
+            state_with_provider_and_services(provider, None, Some(cron), None).await;
+        let client = InMemoryServer::start(state);
+
+        async fn slash(client: &DaemonClient, line: &str) -> SlashResponse {
+            let value =
+                crate::entry::cli::request_result(client, "slash.execute", json!({"line": line}))
+                    .await
+                    .unwrap();
+            serde_json::from_value(value).unwrap()
+        }
+
+        let added = slash(
+            &client,
+            "/cron add smoke interval=60 --retries=1 --backoff=0 执行巡检",
+        )
+        .await;
+        assert!(
+            matches!(added, SlashResponse::Text { content } if content.contains("已添加 smoke"))
+        );
+        let listed = slash(&client, "/cron list").await;
+        assert!(
+            matches!(listed, SlashResponse::Text { content } if content.contains("smoke") && content.contains("interval=60s"))
+        );
+        let disabled = slash(&client, "/cron disable smoke").await;
+        assert!(matches!(disabled, SlashResponse::Text { content } if content.contains("已停用")));
+        let ran = slash(&client, "/cron run-now smoke").await;
+        assert!(
+            matches!(ran, SlashResponse::Text { content } if content.contains("立即运行成功") && content.contains("执行巡检"))
+        );
+        let refused = slash(&client, "/cron remove smoke").await;
+        assert!(
+            matches!(refused, SlashResponse::Text { content } if content.contains("--confirm"))
+        );
+        let removed = slash(&client, "/cron remove smoke --confirm").await;
+        assert!(
+            matches!(removed, SlashResponse::Text { content } if content.contains("已删除 smoke"))
+        );
+
+        let _ = std::fs::remove_file(session_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn slash_mcp_list_status_and_reload_share_daemon_manager() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let workspace =
+            std::env::temp_dir().join(format!("my-agent-slash-mcp-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let approvals = ApprovalBroker::new();
+        let safety = Arc::new(SafetyPolicy::new(&workspace, Arc::new(approvals)).unwrap());
+        let mcp = Arc::new(McpManager::new(&workspace, safety));
+        mcp.reload().await;
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::new()),
+        });
+        let (state, session_path) =
+            state_with_provider_and_services(provider, None, None, Some(mcp)).await;
+        let client = InMemoryServer::start(state);
+
+        for line in ["/mcp list", "/mcp status", "/mcp reload"] {
+            let value =
+                crate::entry::cli::request_result(&client, "slash.execute", json!({"line": line}))
+                    .await
+                    .unwrap();
+            let response: SlashResponse = serde_json::from_value(value).unwrap();
+            assert!(
+                matches!(response, SlashResponse::Text { content } if content.contains("未配置 MCP server"))
+            );
+        }
+
+        let _ = std::fs::remove_file(session_path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     async fn test_state() -> (Arc<DaemonState>, std::path::PathBuf) {
@@ -293,6 +421,52 @@ mod tests {
             responses: Mutex::new(VecDeque::from([Response::Text("回环回答".to_owned())])),
         }))
         .await
+    }
+
+    #[tokio::test]
+    async fn slash_skill_commands_share_the_daemon_owned_library() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let workspace =
+            std::env::temp_dir().join(format!("my-agent-slash-skill-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let source = workspace.join("demo source.md");
+        std::fs::write(
+            &source,
+            "---\nname: demo\nversion: 1.0.0\ndescription: 演示 skill\nkeywords: [demo]\nscope: [rust]\n---\n正文\n",
+        )
+        .unwrap();
+        let skills = SkillLibrary::from_env(&workspace);
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::new()),
+        });
+        let (state, session_path) = state_with_provider_and_skills(provider, Some(skills)).await;
+        let client = InMemoryServer::start(state);
+
+        async fn slash(client: &DaemonClient, line: &str) -> SlashResponse {
+            let value =
+                crate::entry::cli::request_result(client, "slash.execute", json!({"line": line}))
+                    .await
+                    .unwrap();
+            serde_json::from_value(value).unwrap()
+        }
+
+        let installed = slash(&client, &format!("/skill install {}", source.display())).await;
+        assert!(
+            matches!(installed, SlashResponse::Text { content } if content.contains("已安装 demo@1.0.0"))
+        );
+        let listed = slash(&client, "/skill list").await;
+        assert!(
+            matches!(listed, SlashResponse::Text { content } if content.contains("demo@1.0.0"))
+        );
+        let refused = slash(&client, "/skill remove demo").await;
+        assert!(
+            matches!(refused, SlashResponse::Text { content } if content.contains("--confirm"))
+        );
+        let removed = slash(&client, "/skill remove demo --confirm").await;
+        assert!(matches!(removed, SlashResponse::Text { content } if content.contains("已删除")));
+
+        let _ = std::fs::remove_file(session_path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]

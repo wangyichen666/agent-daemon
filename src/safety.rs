@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +102,72 @@ impl SafetyPolicy {
         }
     }
 
+    pub async fn authorize_external_action(
+        &self,
+        description: &str,
+        arguments: &Value,
+    ) -> Result<()> {
+        let mut notices = Vec::new();
+        self.inspect_external_arguments(arguments, None, &mut notices)?;
+        let arguments = arguments
+            .to_string()
+            .chars()
+            .take(1_000)
+            .collect::<String>();
+        let details = if notices.is_empty() {
+            String::new()
+        } else {
+            format!("；安全提示：{}", notices.join("；"))
+        };
+        let prompt = format!(
+            "执行外部 MCP 工具（默认视为有副作用）：{description}；参数：{arguments}{details}"
+        );
+        if self.approval.request(&prompt).await? {
+            Ok(())
+        } else {
+            Err(SafetyError::UserRejected(prompt).into())
+        }
+    }
+
+    fn inspect_external_arguments(
+        &self,
+        value: &Value,
+        key: Option<&str>,
+        notices: &mut Vec<String>,
+    ) -> Result<()> {
+        match value {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    self.inspect_external_arguments(value, Some(key), notices)?;
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.inspect_external_arguments(item, key, notices)?;
+                }
+            }
+            Value::String(text) if key.is_some_and(is_command_key) => {
+                match classify_command(text) {
+                    CommandDecision::Blocked(reason) => {
+                        return Err(SafetyError::BlockedCommand(reason).into());
+                    }
+                    CommandDecision::NeedsApproval(reason) => {
+                        notices.push(format!("高风险命令：{reason}"));
+                    }
+                    CommandDecision::Allowed => {}
+                }
+            }
+            Value::String(text) if key.is_some_and(is_path_key) => {
+                let resolved = self.resolve_path(Path::new(text))?;
+                if !resolved.starts_with(&self.workspace) {
+                    notices.push(format!("工作区外路径：{}", resolved.display()));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn resolve_path(&self, requested: &Path) -> Result<PathBuf> {
         let candidate = if requested.is_absolute() {
             requested.to_path_buf()
@@ -110,6 +177,21 @@ impl SafetyPolicy {
         let normalized = lexical_normalize(&candidate);
         resolve_existing_prefix(&normalized)
     }
+}
+
+fn is_command_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "command" | "cmd" | "shell"
+    )
+}
+
+fn is_path_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "path" | "paths" | "cwd" | "directory" | "root"
+    ) || key.ends_with("_path")
 }
 
 pub fn classify_command(command: &str) -> CommandDecision {
@@ -335,6 +417,36 @@ mod tests {
                 .unwrap(),
             outside
         );
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn external_tool_arguments_keep_command_and_path_safety_checks() {
+        let approval = Arc::new(FixedApproval {
+            allowed: true,
+            calls: AtomicUsize::new(0),
+        });
+        let workspace = std::env::current_dir().unwrap();
+        let policy = SafetyPolicy::new(&workspace, approval.clone()).unwrap();
+        assert!(
+            policy
+                .authorize_external_action(
+                    "server / tool",
+                    &serde_json::json!({"command": "rm -rf /"}),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
+
+        let outside = workspace.parent().unwrap().join("external-output.txt");
+        policy
+            .authorize_external_action(
+                "server / tool",
+                &serde_json::json!({"output_path": outside}),
+            )
+            .await
+            .unwrap();
         assert_eq!(approval.calls.load(Ordering::SeqCst), 1);
     }
 }

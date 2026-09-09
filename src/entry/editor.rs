@@ -25,6 +25,7 @@ use crate::daemon::approval::PendingApprovalInfo;
 use crate::daemon::protocol::{EventFrame, EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
 use crate::provider::{Message, Role};
+use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
 
 type ActiveRequests = Arc<Mutex<HashMap<String, RequestId>>>;
 
@@ -155,6 +156,19 @@ fn build_acp_agent(client: DaemonClient, workspace: PathBuf) -> impl ConnectTo<A
                         Ok(message) => message,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if message.trim_start().starts_with('/') {
+                        return match run_acp_slash(
+                            &client,
+                            &task_connection,
+                            &request.session_id,
+                            &message,
+                        )
+                        .await
+                        {
+                            Ok(()) => responder.respond(PromptResponse::new(StopReason::EndTurn)),
+                            Err(error) => responder.respond_with_error(error),
+                        };
+                    }
                     let session_key = request.session_id.to_string();
                     let stream = match client
                         .request("chat.send", json!({"message": message}))
@@ -206,6 +220,74 @@ fn build_acp_agent(client: DaemonClient, workspace: PathBuf) -> impl ConnectTo<A
             },
             agent_client_protocol::on_receive_notification!(),
         )
+}
+
+async fn run_acp_slash(
+    client: &DaemonClient,
+    connection: &ConnectionTo<AcpClient>,
+    session_id: &SessionId,
+    line: &str,
+) -> Result<(), AcpError> {
+    let registry = SlashRegistry::builtin();
+    let parsed = registry.parse(line);
+    let allowed = matches!(
+        &parsed,
+        SlashParse::Command(crate::slash::SlashInvocation {
+            action: SlashAction::Help
+                | SlashAction::Status
+                | SlashAction::Sessions
+                | SlashAction::Ping,
+            ..
+        }) | SlashParse::Error(_)
+    ) || matches!(
+        &parsed,
+        SlashParse::Command(crate::slash::SlashInvocation {
+            action: SlashAction::Mcp,
+            args,
+        }) if matches!(args.as_slice(), [command] if command == "list" || command == "status")
+    );
+    let content = if allowed {
+        let value =
+            crate::entry::cli::request_result(client, "slash.execute", json!({"line": line}))
+                .await
+                .map_err(internal_error)?;
+        let response: SlashResponse = serde_json::from_value(value)
+            .map_err(|error| internal_error(anyhow::Error::from(error)))?;
+        render_acp_slash_response(response)
+    } else {
+        "ACP 入口仅支持只读 slash 命令：/help、/status、/sessions、/ping、/mcp list、/mcp status。会话切换请使用 ACP session/new 或 session/load。".to_owned()
+    };
+    connection.send_notification(SessionNotification::new(
+        session_id.clone(),
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(content.into())),
+    ))
+}
+
+fn render_acp_slash_response(response: SlashResponse) -> String {
+    match response {
+        SlashResponse::Text { content } => content,
+        SlashResponse::Sessions { sessions, .. } => {
+            if sessions.is_empty() {
+                return "暂无会话记录。".to_owned();
+            }
+            sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| {
+                    format!(
+                        "{}. {} · {} 条消息 · {}",
+                        index + 1,
+                        session.id,
+                        session.message_count,
+                        session.preview.as_deref().unwrap_or("无摘要")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        SlashResponse::Exit => "ACP 入口不支持 /exit。".to_owned(),
+        SlashResponse::SessionChanged { message, .. } => message,
+    }
 }
 
 fn require_workspace(requested: &Path, workspace: &Path) -> Result<(), AcpError> {
@@ -637,12 +719,20 @@ mod tests {
                         .await?;
                     let prompt = connection
                         .send_request(PromptRequest::new(
-                            session.session_id,
+                            session.session_id.clone(),
                             vec![ContentBlock::Text(TextContent::new("执行测试动作"))],
                         ))
                         .block_task()
                         .await?;
                     assert_eq!(prompt.stop_reason, StopReason::EndTurn);
+                    let ping = connection
+                        .send_request(PromptRequest::new(
+                            session.session_id,
+                            vec![ContentBlock::Text(TextContent::new("/ping"))],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(ping.stop_reason, StopReason::EndTurn);
                     Ok(())
                 },
             )
@@ -668,6 +758,15 @@ mod tests {
                     content: ContentBlock::Text(text),
                     ..
                 }) if text.text == "审批后完成"
+            )
+        }));
+        assert!(updates.iter().any(|update| {
+            matches!(
+                update,
+                SessionUpdate::AgentMessageChunk(ContentChunk {
+                    content: ContentBlock::Text(text),
+                    ..
+                }) if text.text == "pong"
             )
         }));
         drop(updates);

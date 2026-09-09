@@ -13,9 +13,12 @@ use tokio::sync::{Mutex, broadcast};
 
 use self::approval::ApprovalBroker;
 use self::protocol::{EventFrame, EventKind, JsonRpcResponse, RequestId, ServerFrame};
+use crate::cron::CronManager;
 use crate::loop_engine::{CancellationToken, LoopEngine};
+use crate::mcp::McpManager;
 use crate::provider::Message;
 use crate::session::SessionStore;
+use crate::skills::SkillLibrary;
 
 pub struct DaemonState {
     pub(crate) engine: Arc<LoopEngine>,
@@ -25,6 +28,9 @@ pub struct DaemonState {
     pub(crate) approvals: ApprovalBroker,
     pub(crate) active: Mutex<HashMap<RequestId, ActiveRequest>>,
     pub(crate) shutdown: CancellationToken,
+    pub(crate) skills: Option<SkillLibrary>,
+    pub(crate) cron: Option<Arc<CronManager>>,
+    pub(crate) mcp: Option<Arc<McpManager>>,
 }
 
 const ACTIVE_REPLAY_BYTES: usize = 1024 * 1024;
@@ -104,11 +110,35 @@ impl ActiveRequest {
 }
 
 impl DaemonState {
+    #[cfg(test)]
     pub fn new(
         engine: Arc<LoopEngine>,
         history: Vec<Message>,
         session: Arc<SessionStore>,
         approvals: ApprovalBroker,
+    ) -> Self {
+        Self::new_with_skills(engine, history, session, approvals, None)
+    }
+
+    #[cfg(test)]
+    pub fn new_with_skills(
+        engine: Arc<LoopEngine>,
+        history: Vec<Message>,
+        session: Arc<SessionStore>,
+        approvals: ApprovalBroker,
+        skills: Option<SkillLibrary>,
+    ) -> Self {
+        Self::new_with_services(engine, history, session, approvals, skills, None, None)
+    }
+
+    pub fn new_with_services(
+        engine: Arc<LoopEngine>,
+        history: Vec<Message>,
+        session: Arc<SessionStore>,
+        approvals: ApprovalBroker,
+        skills: Option<SkillLibrary>,
+        cron: Option<Arc<CronManager>>,
+        mcp: Option<Arc<McpManager>>,
     ) -> Self {
         Self {
             engine,
@@ -118,10 +148,29 @@ impl DaemonState {
             approvals,
             active: Mutex::new(HashMap::new()),
             shutdown: CancellationToken::new(),
+            skills,
+            cron,
+            mcp,
         }
     }
 
     pub async fn has_active_turns(&self) -> bool {
         !self.active.lock().await.is_empty()
+    }
+
+    pub async fn has_persistent_background_work(&self) -> bool {
+        match &self.cron {
+            Some(cron) => cron.keeps_daemon_alive().await,
+            None => false,
+        }
+    }
+
+    pub async fn join_background(&self) {
+        if let Some(cron) = &self.cron {
+            cron.join().await;
+        }
+        if let Some(mcp) = &self.mcp {
+            mcp.shutdown().await;
+        }
     }
 }

@@ -18,6 +18,7 @@ use crate::daemon::protocol::{EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
 use crate::provider::{Message, Role};
 use crate::session::SessionInfo;
+use crate::slash::SlashResponse;
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -369,57 +370,13 @@ async fn handle_frame(state: &mut TuiState, frame: ServerFrame) -> Result<()> {
 
 async fn submit_input(client: &DaemonClient, state: &mut TuiState, message: String) -> Result<()> {
     let input = message.trim();
-    match input {
-        "/exit" | "/quit" => {
-            state.status = "退出".to_owned();
-            return Ok(());
-        }
-        "/help" => {
-            state.messages.push(UiMessage {
-                role: Role::System,
-                content: "/resume：列出历史会话\n/resume <编号或 ID>：恢复会话\n/new：新建空白会话\n/status：查看当前状态\n/exit：退出 TUI".to_owned(),
-            });
-            state.status = "已显示命令帮助".to_owned();
-            return Ok(());
-        }
-        "/resume" | "/sessions" => {
-            show_resume_choices(client, state).await?;
-            return Ok(());
-        }
-        "/new" => {
-            let snapshot = recovery::start_new_session(client).await?;
-            let id = snapshot.session_id.clone();
-            state.replace_snapshot(snapshot);
-            state.status = format!("已新建会话：{id}");
-            return Ok(());
-        }
-        "/status" => {
-            let snapshot = recovery::load_snapshot(client).await?;
-            state.status = format!(
-                "会话 {} · {} 条消息",
-                snapshot.session_id,
-                snapshot.messages.len()
-            );
-            return Ok(());
-        }
-        "/cancel" => {
-            state.status = "当前没有正在运行的请求".to_owned();
-            return Ok(());
-        }
-        _ => {}
-    }
-
-    if let Some(selection) = input.strip_prefix("/resume ") {
-        resume_selection(client, state, selection.trim()).await?;
-        return Ok(());
-    }
     if input.starts_with('/') {
-        state.status = format!("未知命令：{input} · 输入 /help 查看命令");
+        execute_slash(client, state, input).await?;
         return Ok(());
     }
     if !state.resume_choices.is_empty() && input.chars().all(|character| character.is_ascii_digit())
     {
-        resume_selection(client, state, input).await?;
+        execute_slash(client, state, &format!("/resume {input}")).await?;
         return Ok(());
     }
 
@@ -434,18 +391,54 @@ async fn submit_input(client: &DaemonClient, state: &mut TuiState, message: Stri
     Ok(())
 }
 
-async fn show_resume_choices(client: &DaemonClient, state: &mut TuiState) -> Result<()> {
-    state.resume_choices = recovery::list_sessions(client)
-        .await?
-        .into_iter()
-        .filter(|session| session.message_count > 0)
-        .collect();
-    if state.resume_choices.is_empty() {
-        state.status = "暂无可恢复的历史会话".to_owned();
-        return Ok(());
+async fn execute_slash(client: &DaemonClient, state: &mut TuiState, line: &str) -> Result<()> {
+    let value =
+        crate::entry::cli::request_result(client, "slash.execute", json!({"line": line})).await?;
+    let response: SlashResponse =
+        serde_json::from_value(value).context("daemon slash.execute 格式无效")?;
+    match response {
+        SlashResponse::Text { content } => {
+            state.messages.push(UiMessage {
+                role: Role::System,
+                content,
+            });
+            state.status = "命令已完成".to_owned();
+        }
+        SlashResponse::Exit => state.status = "退出".to_owned(),
+        SlashResponse::Sessions { sessions, select } => {
+            state.resume_choices = if select { sessions.clone() } else { Vec::new() };
+            state.messages.push(UiMessage {
+                role: Role::System,
+                content: render_session_choices(&sessions, select),
+            });
+            state.scroll = 0;
+            state.status = if sessions.is_empty() {
+                "暂无会话记录".to_owned()
+            } else if select {
+                "请选择要恢复的 session".to_owned()
+            } else {
+                "已列出 session".to_owned()
+            };
+        }
+        SlashResponse::SessionChanged { message, snapshot } => {
+            let snapshot = recovery::parse_snapshot(snapshot, "slash.execute")?;
+            state.replace_snapshot(snapshot);
+            state.status = message;
+        }
+    }
+    Ok(())
+}
+
+fn render_session_choices(sessions: &[SessionInfo], select: bool) -> String {
+    if sessions.is_empty() {
+        return if select {
+            "暂无可恢复的历史会话。".to_owned()
+        } else {
+            "暂无会话记录。".to_owned()
+        };
     }
     let mut lines = vec!["可恢复的历史会话：".to_owned()];
-    for (index, session) in state.resume_choices.iter().enumerate() {
+    for (index, session) in sessions.iter().enumerate() {
         let marker = if session.active { " · 当前" } else { "" };
         let preview = session.preview.as_deref().unwrap_or("无摘要");
         lines.push(format!(
@@ -455,39 +448,10 @@ async fn show_resume_choices(client: &DaemonClient, state: &mut TuiState) -> Res
             session.message_count
         ));
     }
-    lines.push("输入编号，或使用 /resume <编号或 session ID>。".to_owned());
-    state.messages.push(UiMessage {
-        role: Role::System,
-        content: lines.join("\n"),
-    });
-    state.scroll = 0;
-    state.status = "请选择要恢复的 session".to_owned();
-    Ok(())
-}
-
-async fn resume_selection(
-    client: &DaemonClient,
-    state: &mut TuiState,
-    selection: &str,
-) -> Result<()> {
-    let session_id = resolve_session_selection(&state.resume_choices, selection)?;
-    let snapshot = recovery::resume_session(client, &session_id).await?;
-    let message_count = snapshot.messages.len();
-    state.replace_snapshot(snapshot);
-    state.status = format!("已恢复 {session_id} · {message_count} 条消息");
-    Ok(())
-}
-
-fn resolve_session_selection(choices: &[SessionInfo], selection: &str) -> Result<String> {
-    match selection.parse::<usize>() {
-        Ok(index) if index > 0 => choices
-            .get(index - 1)
-            .map(|session| session.id.clone())
-            .with_context(|| format!("会话编号超出范围：{index}")),
-        Ok(_) => anyhow::bail!("会话编号从 1 开始"),
-        Err(_) if !selection.is_empty() => Ok(selection.to_owned()),
-        Err(_) => anyhow::bail!("session ID 不能为空"),
+    if select {
+        lines.push("输入编号，或使用 /resume <编号或 session ID>。".to_owned());
     }
+    lines.join("\n")
 }
 
 fn message_to_ui(message: Message) -> Option<UiMessage> {
@@ -533,27 +497,6 @@ mod tests {
         let converted = message_to_ui(message).expect("文本消息应可显示");
         assert_eq!(converted.role, Role::User);
         assert_eq!(converted.content, "检查项目");
-    }
-
-    #[test]
-    fn resolves_resume_number_or_stable_id() {
-        let choices = vec![SessionInfo {
-            id: "session-123.jsonl".to_owned(),
-            path: "session-123.jsonl".into(),
-            active: false,
-            message_count: 2,
-            modified_at: None,
-            preview: Some("旧问题".to_owned()),
-        }];
-        assert_eq!(
-            resolve_session_selection(&choices, "1").unwrap(),
-            "session-123.jsonl"
-        );
-        assert_eq!(
-            resolve_session_selection(&choices, "session-123.jsonl").unwrap(),
-            "session-123.jsonl"
-        );
-        assert!(resolve_session_selection(&choices, "2").is_err());
     }
 
     #[tokio::test]
@@ -615,6 +558,17 @@ mod tests {
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.messages[0].content, "需要恢复的旧问题");
         assert_eq!(state.messages[1].content, "旧回答");
+
+        submit_input(&client, &mut state, "/ping".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("pong")
+        );
 
         let _ = std::fs::remove_file(SessionStore::pointer_path(&session_path));
         let _ = std::fs::remove_file(session_path);

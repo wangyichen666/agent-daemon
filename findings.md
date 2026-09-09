@@ -121,3 +121,73 @@
 - 设计选择：每个 session 使用稳定独立 JSONL 文件，SessionStore 保存一个 current 指针；`session.resume {session_id}` 只接受列表内安全文件名。TUI/REPL 启动显式调用 `session.new`，`/resume` 再由用户选择历史，不再自动加载旧对话。
 - SQLite 评估：对于大量 session 的时间/标题/关键词检索、跨表事务和未来全文搜索，SQLite 优于遍历 JSONL；但当前单用户 daemon 下不是 `/resume` 的必要依赖。适合后续作为结构化索引与元数据层，原始大内容仍文件化，并通过迁移工具导入现有 JSONL。
 - session 并发审计补充：仅用 active/history 锁仍会让 `session.load` 与 new/resume 在极窄窗口返回“旧历史 + 新 ID”的混合快照；DaemonState 增加专用 `session_switch` 互斥后，load/new/resume 的路径与 ID 观察保持一致。
+
+## 六项通用能力补齐：基线审阅（2026-09-09）
+
+- Provider 基线：`Provider` 仅要求 `chat`，默认 `chat_stream` 只为纯文本补发 `TextDelta`；`ProviderEvent` 当前只有 `TextDelta`；`OpenAiProvider` 在 `parse_sse`/`consume_sse_line` 内同时做 wire 解码、按 index 累积 id/name/arguments、JSON 解析并直接产出 `Response::ToolCalls`。
+- 当前 tool-call 装配所有权在 provider，而非 agent。OpenAI arguments 使用 `push_str` 纯顺序拼接，没有长度优先或合法 JSON 快照替换；但没有 Started/Delta/Completed 生命周期、identity 分域、重复完成/EOF 不完整检测。
+- `LoopEngine::run_turn_with_events` 收到完整 `Response::ToolCalls` 后先持久化 assistant 调用，再进入 `execute_in_waves`；只读连续段用 `buffered(8)`，写类串行。`ToolRegistry::execute` 先用自研 JSON Schema 子集校验，再调用工具；路径/命令 safety 与 approval 位于具体工具持有的 `SafetyPolicy` 中。
+- 当前装配异常发生在 provider 请求返回阶段，因此不会执行本轮工具；但不存在可折回模型的 typed assembly error，错误会直接终止 turn。
+- tool result 通过 `Message::tool_result` 原样使用 `ToolCall.id` 回填，provider 原始 id 同时也是内部执行 key，尚未做协议域隔离。
+- `Config` 目前直接检查 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`MODEL_NAME`，没有 `API_TYPE`；daemon runtime 直接构造 `OpenAiProvider::from_env()`。
+- Slash 基线：CLI `run_repl` 与 TUI `submit_input` 各有一套硬编码 `match`，帮助文本也各自维护且已发生漂移（CLI 广告 sessions/cancel，TUI 帮助未完整列出）；HTTP/OpenAI 入口和 ACP 目前不解析 slash。
+- 既有命令最终都通过 daemon RPC 或公共 recovery helper 操作 session/cancel，适合把“解析 + 命令描述 + RPC 意图/统一响应”下沉，入口只保留终端特有交互渲染。
+- Skill 基线：`SkillLibrary::context_for` 每次在 blocking 线程扫描目录；索引项为文件 stem/title/summary/body，标题从 `# ` 猜测、摘要从 `summary:`/`摘要：`或首段猜测；ASCII term + 中文 bigram 交集计数，substring 加 100，按 id 稳定打破平分，最多载入 3 个正文。当前索引并非常驻且读文件时正文已全部载入内存。
+- daemon 请求通过 `DaemonState::handle_request` 集中分派，后台 turn、审批与 shutdown 由 Tokio task/channel/cancellation 管理；`LoopEngine::ephemeral` 是 sub-agent 的隔离历史执行入口。
+- `PlanStore::persist_state` 使用同目录 `.tmp-<pid>` 写入后 `tokio::fs::rename` 原子提交，可复用于 cron store。
+- `ToolRegistry` 已是 `HashMap<String, Arc<dyn Tool>>`，支持 clone、stable specs 与 subset；`register` 当前会静默覆盖同名项，MCP 注册需显式检测冲突并加稳定前缀。
+- daemon runtime 的唯一装配点是 `build_daemon_state`；`DaemonState` 持有 engine/history/session/approval/active/shutdown。Unix server 的主 `select!` 监听连接、空闲、显式 shutdown、Ctrl-C，退出前等待 active turn，然后清理运行标记；cron scheduler 与 MCP manager 应由 state 持有并在 shutdown 分支显式停止。
+- 现有 daemon 会在最后客户端断开且无 active turn 后约 2 秒退出，这与“常驻 cron”语义冲突；启用 cron/heartbeat 时需要让后台工作成为 daemon 存活条件，或调整生命周期为有 enabled job 时不空闲退出。
+- `SubAgentTool` 用 `LoopEngine::ephemeral` + 新 `Vec<Message>` + memory-only plan 实现隔离历史，但它是模型工具且会选择受限工具子集；cron 可复用同一隔离 runner 思路，不应通过当前用户 session 的 `LoopEngine::new`。
+- `ContextManager` 当前无 provider capability 判断；总是传完整 specs，多模态由 `ReadFileTool::from_env` 与 transient image message 控制。能力降级最合适放在统一 Provider trait/factory 或 LoopEngine 请求边界，不能在入口分叉。
+- tracing 在 `main::init_tracing` 初始化；当前 usage 只在 OpenAI SSE 的 `consume_sse_line` 内以 debug 字段记录，无独立 metrics store。
+- SessionStore 是 append-only JSONL，独立 session 由文件/指针管理；cron 不应切换该全局 current session，可直接使用 ephemeral engine 或单独的 session 文件/runner。
+- 初始质量门禁：`cargo test --all-targets` 64/64 通过；严格 Clippy 与 rustfmt check 均通过。
+
+## 项目一与项目二完成结论（2026-09-09）
+
+- 新 Provider 契约把 wire 解码归一为 TextDelta/ToolCallStarted/ToolCallDelta/ToolCallCompleted/typed failure；OpenAI、Anthropic、Ollama 分别封装 SSE/SSE/NDJSON 差异。
+- execution identity 使用 `tc1:<协议域>:<id|pos>:<值>`，wire id 用 URL-safe base64 可逆编码；OpenAI/Anthropic 出站回放只发送还原的原始 id，Ollama idless 调用仅在完整调用出现时分配流内 position。
+- canonical assembler 独占 arguments：Append 永远逐字节追加，只有显式 AuthoritativeSnapshot 才覆盖；重复开始/完成/快照、匿名或迟到 delta、EOF 未完成、非法 JSON 都形成 typed failure。
+- LoopEngine 在任何执行前对整批调用做存在性与 schema admission；assembly 与 admission 错误类型分离，并作为 system feedback 折回模型。本轮任一错误均不执行任何工具。
+- capability 由 Provider trait 暴露；不支持工具时不注入 specs，不支持图片时统一降级为文字提示，入口/Context 不按 api_type 分叉。
+- 三个本地 TCP mock 分别验证工具调用、agent 装配、tool result 协议回填和后续文本响应；全量 79/79 测试、严格 Clippy、fmt 通过。
+
+## 项目三完成结论（2026-09-09）
+
+- `src/slash.rs` 是命令名、alias、usage、参数规格、help 与 action 的唯一注册表；`/help` 完全由注册表生成，新增 `/ping` 只注册一次。
+- daemon 新增 `slash.execute`，session 状态查询/新建/恢复等副作用仍由 DaemonState 执行；CLI/TUI 只解析统一 SlashResponse 并做各自渲染，不再保留命令 match 或平行帮助。
+- ACP prompt 复用同一注册表，明确只允许 help/status/sessions/ping 四个只读命令；会话切换继续使用标准 ACP session 方法。WebSocket 可直接调用相同 daemon RPC；OpenAI HTTP prompt 不广告 slash。
+- TUI 集成与正式 ACP Client 测试均断言 `/ping` 返回 pong；全量 80/80、严格 Clippy、fmt 通过。
+
+## 项目四完成结论（2026-09-09）
+
+- Skill 必须使用 YAML frontmatter 声明 name/version/description/keywords/scope；无效文件按项 warn 并跳过，不拖垮索引。
+- SkillLibrary 以共享 RwLock 常驻元数据索引，正文仅在命中后重新读取；排序权重为精确 keyword ≫ 归一化 metadata term/bigram ≫ 正文 term/bigram，并按 version 降序、name 升序稳定打破平分。
+- 本地安装器把源限制在工作区内、目标固定为 `.my-agent/skills`，用临时文件 + rename 提交；高版本覆盖、同版 skip、降级需 `--force`，remove 必须 `--confirm`。
+- `/skill list/install/update/remove` 通过共享 slash + daemon 持有的 SkillLibrary 执行；坏 frontmatter、版本冲突、稳定排序和 slash 主路径均有测试。
+- 新增固定依赖 `serde_yaml_ng =0.10.0`（MIT）与 `semver =1.0.28`（MIT OR Apache-2.0）；84/84、严格 Clippy、fmt 通过。
+
+## 项目五完成结论（2026-09-09）
+
+- `CronStore` 原子持久化 `.my-agent/cron.json`，支持 interval 与标准五段 cron、启停、删除、有限历史及重启恢复；坏文件降级为空 store，不阻断 daemon。
+- `CronManager` 后台 tick 支持轻量 stagger、有限指数退避、可关闭 heartbeat；heartbeat 只做 store 自检，不调用模型。enabled job 或 heartbeat 会阻止 daemon 空闲退出，显式停止时后台任务可 join。
+- `AgentCronRunner` 每次使用全新历史和独立 `.my-agent/cron-sessions` 文件；无人值守工具注册表使用独立 `UnattendedApproval`，所有需审批动作默认拒绝并写入最终运行记录。
+- `/cron list/add/enable/disable/run-now/remove` 由共享 Slash 注册表与 daemon 真相执行，删除要求 `--confirm`。持久化、到点触发、失败重试、审批拒绝、五段表达式和 slash 主路径均有测试。
+- 新增固定依赖 `chrono =0.4.45`、`cron =0.17.0`，两者均为 MIT OR Apache-2.0；89/89、严格 Clippy、fmt 通过。
+
+## 项目六完成结论（2026-09-09）
+
+- `src/mcp.rs` 是自研 stdio JSON-RPC 客户端：支持换行与 Content-Length framing，完成 `initialize → notifications/initialized → tools/list`，并把 `tools/call` 结果转换为普通工具文本。
+- `.my-agent/mcp.json` 做文件级与 server 级双层隔离；非法 JSON/顶层结构只禁用 MCP，单个 server 配置/握手失败不影响其它 server。仅在 `args`、env value、cwd 展开 `${...}`，`command` 与 env key 保持原样；相对 cwd 必须落在工作区内。
+- 工具以 `mcp__<server>__<tool>` 稳定前缀动态注册，schema 进入现有整批 admission；reload 原子替换动态 snapshot，`/mcp list/status/reload` 通过共享 Slash/daemon 执行。
+- MCP 调用进入 `SafetyPolicy::authorize_external_action`：默认视为副作用并走审批，参数中的灾难命令硬拒，路径边界提示进入审批；不引入第三方 MCP SDK。daemon shutdown/reload 会关闭 stdin、kill/wait 子进程并清理 pending 请求。
+- 测试覆盖合法/非法 server 共存、占位符边界、两种 framing、模型 tool-call→MCP→工具结果回填、默认拒绝、子进程清理与 slash 主路径。
+
+## 最终全量验收（2026-09-09）
+
+- `cargo fmt --all -- --check` 通过。
+- `cargo build --release` 通过。
+- `cargo test --all-targets`：97/97 通过。
+- `cargo clippy --all-targets --all-features -- -D warnings` 通过且无 warning。
+- 文档已同步 README 与 `docs/agent-system.html`；明确新增配置、slash、MCP stdio 限制和安全边界。

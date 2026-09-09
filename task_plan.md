@@ -28,14 +28,14 @@
 | 第二批 5. 重复检测 | complete | 调用/参数/结果指纹与建议性提示 |
 | 第二批 6. 两级压缩 | complete | 60% 温和压缩、85% 强力压缩、环境可配置 |
 | 第三批 7. skill | complete | Markdown 索引、关键词/bigram 匹配、按需正文注入 |
-| 第三批 8. cron | deferred | 蓝图明确为第三批可停项；留作独立迭代，避免本轮扩大 REPL 并发状态面 |
-| 第三批 9. MCP | deferred | 蓝图明确为第三批可停项；留作独立迭代，避免未经选型引入外部协议生命周期 |
+| 第三批 8. cron | complete | daemon 内轻量调度、独立 session、重试、heartbeat、持久化与 slash 管理 |
+| 第三批 9. MCP | complete | 自研 stdio JSON-RPC、握手、动态工具桥接、审批隔离与子进程生命周期 |
 | 进阶全量验收 | complete | release build、36 项测试、严格 clippy、格式、CLI 烟雾测试与文档 |
 
 ### 进阶实施原则
 
 - 在现有模块边界上增量重构，不重写核心。
-- 第一批、第二批全部实现；第三批先实现 skill，cron/MCP 在前两批稳定后再按复杂度评估。
+- 第一批、第二批与第三批 skill/cron/MCP 均已实现；新增外部能力仍必须进入统一工具注册、schema、safety 与 approval 链路。
 - sub_agent 默认受限工具集，不持久化到主 session，且不暴露自身，递归深度固定为 1。
 - 多模态优先保持 OpenAI 兼容；PDF 采用本地开源解析，图片能力通过可选模型配置控制。
 
@@ -45,7 +45,7 @@
 - API 使用 OpenAI Chat Completions 兼容协议，配置全部来自环境变量。
 - 安全审批由 CLI 回调提供；工具与主循环只依赖抽象接口。
 - 测试使用 mock provider，不依赖真实密钥或网络。
-- 阶段五只默认实现蓝图中最贴合个人版定位的长期记忆；cron、子 Agent、MCP 保留扩展点，不增加本次核心复杂度。
+- 阶段五已补齐个人版所需的记忆、cron、子 Agent 与本地 MCP；远程 MCP transport、RBAC 与系统级沙箱仍明确留作后续。
 
 ## Daemon + 三入口演进（2026-09-08）
 
@@ -186,3 +186,38 @@
 
 - 本轮不引入 SQLite：它对 `/resume` 正确性不是必要条件，同时迁移 session、memory、plan 会扩大风险面。
 - 后续会话规模增长后，可用 SQLite 保存 session/message/plan/memory 元数据与全文索引；图片和大工具输出仍保留文件，仅记录路径，并提供 JSONL 导入。
+
+## 六项通用能力补齐（2026-09-09）
+
+### 目标
+
+在现有单 crate、daemon + 多入口架构上，按顺序实现并验证：多 Provider、严格 tool-call 装配、共享 Slash 命令、版本化 Skill、本地 Cron + Heartbeat、stdio MCP 客户端；保持 OpenAI 路径与既有安全边界兼容。
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 0. 源码基线与现状确认清单 | complete | 通读相关源码，回答需求中的 8 组问题，记录初始测试基线 |
+| 1. 多 Provider 协议 | complete | OpenAI/Anthropic/Ollama mock 闭环；编译、clippy、测试通过 |
+| 2. Tool-call 严格装配 | complete | identity、纯增量装配、fail-closed 测试通过 |
+| 3. Slash 命令框架 | complete | 单注册表、多入口复用、帮助自动生成，回归通过 |
+| 4. Skill 体系升级 | complete | frontmatter、semver、本地安装器、稳定排序测试通过 |
+| 5. Cron + Heartbeat | complete | 持久化、独立会话、有限重试、无人值守安全测试通过 |
+| 6. MCP stdio 客户端 | complete | 握手、工具桥接、隔离、审批、进程清理测试通过 |
+| 7. 全量回归与完成报告 | complete | fmt/check/clippy/tests/release 全绿，配置和限制文档化 |
+
+### 本轮原则
+
+- 严格按 0→7 推进，每阶段验证后再进入下一阶段。
+- 协议差异封装在 provider 内，工具装配失败整轮原子拒绝。
+- 新工具来源不绕过 schema、safety 与 approval；保留用户已有改动。
+
+### 本轮错误记录
+
+- planning-with-files 技能引用的 templates 目录不存在；按技能定义的职责复用并追加仓库现有三份规划文件。
+- 首次 provider 整文件替换补丁因同一 patch 同时 Delete/Add 被拒绝，未产生半成品；拆为两次 apply_patch。
+- 多 Provider 首次 check 发现 Anthropic 消息向量需要显式类型及两项 unused import；按编译器定位修正。
+- 首轮 73 项测试中 4 项旧 mock 语义失败：内部 identity 已编码，且空 ToolCalls 没有事件而被视为文本；测试按 provider 边界还原 id，空批次改为 typed assembly failure。
+- 阶段 1 严格 Clippy 检出一次 `and_then(Some)`，按建议改为 `map`。
+- 定向测试命令误传两个位置过滤器，Cargo 在编译前拒绝；改为单个 `--all-targets` 全量测试，不重复该用法。
+- Slash 接线首次 check 发现已删除的 TUI 本地编号解析测试与两个 dead-code helper；删除平行解析测试/旧 recovery helper，并将仅测试注册表枚举收窄为 cfg(test)。
+- Skill 依赖首次 check 通过但发现两个仅测试构造器在生产目标 dead_code；用 cfg(test) 收窄，并把旧无 frontmatter 的 context fixture 升级为新格式。
+- Cron 首次 check 发现 slash 参数解析使用了未导入的 anyhow Context；补齐 trait import。生产目标还提示测试兼容构造器 dead_code，已用 cfg(test) 收窄。

@@ -642,8 +642,8 @@
         </article>
         <article class="panel status-card">
           <span class="badge limited">可选项未做</span>
-          <h3>cron / MCP</h3>
-          <p>蓝图将二者列为第三批可停项；当前版本尚未加入定时 turn 和外部 MCP 服务器。</p>
+          <h3>Cron / MCP</h3>
+          <p>Cron 已支持持久化 interval/五段表达式、独立 session、有限重试与无人值守安全拒绝；MCP 已支持本地 stdio server 的握手、工具发现、动态桥接、默认审批和进程清理。</p>
         </article>
       </div>
     </section>
@@ -697,7 +697,7 @@
           <div class="step-no">06</div>
           <div class="step-body">
             <h3>流式调用模型</h3>
-            <p>Provider 请求 OpenAI 兼容的 <code>/chat/completions</code>，逐行解析 SSE；文本增量立即变成 daemon 事件，工具 name / arguments 分片则完整重组。</p>
+            <p>Provider 分别适配 OpenAI Chat Completions、Anthropic Messages 与 Ollama，将 SSE/NDJSON 归一为严格生命周期事件；唯一 canonical assembler 负责工具参数重组与 fail-closed。</p>
             <div class="branch">
               <div class="branch-text"><strong>纯文本</strong><br>模型认为任务完成，转到第 11 步。</div>
               <div class="branch-tools"><strong>工具调用</strong><br>进入参数、安全和执行链路。</div>
@@ -849,7 +849,7 @@
         <article class="panel status-card">
           <span class="badge limited">边界</span>
           <h3>保持个人版克制</h3>
-          <p>cron 与 MCP 仍是后续可选项；当前没有 RBAC、向量数据库、企业连接器或操作系统级沙箱。</p>
+          <p>当前没有 RBAC、向量数据库、企业连接器、远程 MCP transport 或操作系统级沙箱；MCP server 仅应来自可信本地配置。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">运行时</span>
@@ -945,7 +945,8 @@
         <article class="panel module-card"><h3><code>daemon/</code></h3><p>DaemonState、协议 SSOT、handlers、审批、运行时装配、生命周期和 Unix socket server。</p></article>
         <article class="panel module-card"><h3><code>client.rs</code></h3><p>持久 Unix 连接、request id 多路复用，以及测试用内存回环传输。</p></article>
         <article class="panel module-card"><h3><code>entry/</code></h3><p>全屏 TUI、CLI REPL、本地 HTTP/SSE + WebSocket 和标准 ACP stdio 入口；recovery helper 统一恢复逻辑。</p></article>
-        <article class="panel module-card"><h3><code>provider.rs</code></h3><p>消息协议、Provider trait、OpenAI 兼容请求、SSE 文本和工具调用解析。</p></article>
+        <article class="panel module-card"><h3><code>provider.rs / provider/</code></h3><p>统一 Provider 契约、execution identity，以及 OpenAI、Anthropic、Ollama 的协议适配。</p></article>
+        <article class="panel module-card"><h3><code>cron.rs / mcp.rs</code></h3><p>持久化本地调度与 heartbeat；自研 MCP stdio JSON-RPC、工具桥接、安全审批和子进程生命周期。</p></article>
         <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、50 轮上限、并行波次、工具结果回填与最终终止判断。</p></article>
         <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>
         <article class="panel module-card"><h3><code>safety.rs</code></h3><p>所有文件路径和命令的单一安全决策点；审批由 daemon 中介挂起和恢复。</p></article>
@@ -972,7 +973,8 @@
           <pre><span class="comment"># 1. 构建</span>
 <span class="prompt">$</span> cargo build --release
 
-<span class="comment"># 2. 配置 OpenAI 兼容服务</span>
+<span class="comment"># 2. 选择 Provider（也支持 anthropic-messages / ollama）</span>
+<span class="prompt">$</span> export API_TYPE='openai-chat'
 <span class="prompt">$</span> export OPENAI_API_KEY='你的密钥'
 <span class="prompt">$</span> export OPENAI_BASE_URL='https://api.deepseek.com'
 <span class="prompt">$</span> export MODEL_NAME='deepseek-v4-flash'

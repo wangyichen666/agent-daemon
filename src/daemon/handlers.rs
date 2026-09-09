@@ -1,13 +1,16 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::protocol::{EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, ServerFrame};
 use super::{ActiveRequest, ActiveRequestUpdate, DaemonState};
+use crate::cron::ScheduleSpec;
 use crate::loop_engine::{AgentEvent, CancellationToken};
+use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
 
 const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -34,6 +37,11 @@ struct CancelParams {
 #[derive(Deserialize)]
 struct SessionResumeParams {
     session_id: String,
+}
+
+#[derive(Deserialize)]
+struct SlashExecuteParams {
+    line: String,
 }
 
 impl DaemonState {
@@ -83,6 +91,13 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "agent.subscribe" => self.handle_subscribe(request, frames).await,
+            "slash.execute" => {
+                let result = match parse_params::<SlashExecuteParams>(&request.params) {
+                    Ok(params) => self.execute_slash(&params.line).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
             "daemon.stop" => {
                 send_result(
                     &frames,
@@ -299,6 +314,271 @@ impl DaemonState {
         }))
     }
 
+    async fn execute_slash(&self, line: &str) -> Result<Value, (i64, String)> {
+        let registry = SlashRegistry::builtin();
+        let response =
+            match registry.parse(line) {
+                SlashParse::NotCommand => SlashResponse::Text {
+                    content: "输入不是 slash 命令".to_owned(),
+                },
+                SlashParse::Error(content) => SlashResponse::Text { content },
+                SlashParse::Command(invocation) => match invocation.action {
+                    SlashAction::Help => SlashResponse::Text {
+                        content: registry.help(),
+                    },
+                    SlashAction::Status => {
+                        let snapshot = self.session_snapshot().await?;
+                        SlashResponse::Text {
+                            content: format!(
+                                "会话 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
+                                snapshot["session_id"].as_str().unwrap_or("unknown"),
+                                snapshot["messages"].as_array().map_or(0, Vec::len),
+                                snapshot["active_requests"].as_array().map_or(0, Vec::len),
+                                snapshot["pending_approvals"].as_array().map_or(0, Vec::len),
+                            ),
+                        }
+                    }
+                    SlashAction::Sessions => SlashResponse::Sessions {
+                        sessions: self.session.list_sessions().await.map_err(|error| {
+                            (INTERNAL_ERROR, format!("列出会话失败：{error:#}"))
+                        })?,
+                        select: false,
+                    },
+                    SlashAction::Resume if invocation.args.is_empty() => SlashResponse::Sessions {
+                        sessions: self
+                            .session
+                            .list_sessions()
+                            .await
+                            .map_err(|error| (INTERNAL_ERROR, format!("列出会话失败：{error:#}")))?
+                            .into_iter()
+                            .filter(|session| session.message_count > 0)
+                            .collect(),
+                        select: true,
+                    },
+                    SlashAction::Resume => {
+                        let sessions = self
+                            .session
+                            .list_sessions()
+                            .await
+                            .map_err(|error| (INTERNAL_ERROR, format!("列出会话失败：{error:#}")))?
+                            .into_iter()
+                            .filter(|session| session.message_count > 0)
+                            .collect::<Vec<_>>();
+                        let selection = &invocation.args[0];
+                        let session_id = match selection.parse::<usize>() {
+                            Ok(index) if index > 0 => sessions
+                                .get(index - 1)
+                                .map(|session| session.id.clone())
+                                .ok_or_else(|| {
+                                    (INVALID_PARAMS, format!("会话编号超出范围：{index}"))
+                                })?,
+                            Ok(_) => return Err((INVALID_PARAMS, "会话编号从 1 开始".to_owned())),
+                            Err(_) => selection.clone(),
+                        };
+                        let snapshot = self.session_resume(&session_id).await?;
+                        let count = snapshot["messages"].as_array().map_or(0, Vec::len);
+                        SlashResponse::SessionChanged {
+                            message: format!("已恢复会话 {session_id}，共 {count} 条消息。"),
+                            snapshot,
+                        }
+                    }
+                    SlashAction::New => {
+                        let snapshot = self.session_new().await?;
+                        let session_id = snapshot["session_id"].as_str().unwrap_or("unknown");
+                        SlashResponse::SessionChanged {
+                            message: format!("已新建会话：{session_id}"),
+                            snapshot,
+                        }
+                    }
+                    SlashAction::Cancel => SlashResponse::Text {
+                        content: "当前没有前台请求；运行中按 Ctrl-C 可取消本轮。".to_owned(),
+                    },
+                    SlashAction::Skill => self.execute_skill_command(&invocation.args).await,
+                    SlashAction::Cron => self.execute_cron_command(&invocation.args).await,
+                    SlashAction::Mcp => self.execute_mcp_command(&invocation.args).await,
+                    SlashAction::Ping => SlashResponse::Text {
+                        content: "pong".to_owned(),
+                    },
+                    SlashAction::Exit => SlashResponse::Exit,
+                },
+            };
+        serde_json::to_value(response)
+            .map_err(|error| (INTERNAL_ERROR, format!("序列化 slash 响应失败：{error}")))
+    }
+
+    async fn execute_skill_command(&self, args: &[String]) -> SlashResponse {
+        let Some(skills) = self.skills.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未启用 skill 管理器。".to_owned(),
+            };
+        };
+        let result = match args.first().map(String::as_str) {
+            Some("list") if args.len() == 1 => skills.list().await.map(|items| {
+                if items.is_empty() {
+                    "暂无已安装 skill。".to_owned()
+                } else {
+                    items
+                        .iter()
+                        .map(|item| format!("{}@{}：{}", item.name, item.version, item.description))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }),
+            Some("install") if args.len() >= 2 => {
+                let force = args.last().is_some_and(|arg| arg == "--force");
+                let end = args.len() - usize::from(force);
+                let path = args[1..end].join(" ");
+                if path.is_empty() {
+                    Err(anyhow::anyhow!("用法：/skill install <路径> [--force]"))
+                } else {
+                    skills
+                        .install(std::path::Path::new(&path), force)
+                        .await
+                        .map(|outcomes| {
+                            outcomes
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                }
+            }
+            Some("update") if args.len() >= 3 => {
+                let path = args[2..].join(" ");
+                skills
+                    .update(&args[1], std::path::Path::new(&path))
+                    .await
+                    .map(|outcome| outcome.to_string())
+            }
+            Some("remove") if args.len() >= 2 => {
+                let confirmed = args.get(2).is_some_and(|arg| arg == "--confirm");
+                if args.len() > 3 {
+                    Err(anyhow::anyhow!("用法：/skill remove <name> --confirm"))
+                } else {
+                    skills.remove(&args[1], confirmed).await
+                }
+            }
+            _ => Err(anyhow::anyhow!(
+                "用法：/skill list | install <路径> [--force] | update <name> <路径> | remove <name> --confirm"
+            )),
+        };
+        SlashResponse::Text {
+            content: match result {
+                Ok(content) => content,
+                Err(error) => format!("Skill 命令失败：{error:#}"),
+            },
+        }
+    }
+
+    async fn execute_cron_command(&self, args: &[String]) -> SlashResponse {
+        let Some(cron) = self.cron.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未启用 cron 管理器。".to_owned(),
+            };
+        };
+        let result = match args.first().map(String::as_str) {
+            Some("list") if args.len() == 1 => {
+                let jobs = cron.store().list().await;
+                Ok(if jobs.is_empty() {
+                    "暂无 cron 任务。".to_owned()
+                } else {
+                    jobs.iter()
+                        .map(|job| {
+                            let last = job.history.last().map_or_else(
+                                || "尚未运行".to_owned(),
+                                |run| {
+                                    format!(
+                                        "上次={}，尝试={}，结果={}",
+                                        run.finished_at,
+                                        run.attempts,
+                                        if run.success { "成功" } else { "失败" }
+                                    )
+                                },
+                            );
+                            format!(
+                                "{} [{}] {} · {} · next={} · {}",
+                                job.name,
+                                job.id,
+                                if job.enabled { "启用" } else { "停用" },
+                                job.schedule.display(),
+                                job.next_run_at,
+                                last
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            }
+            Some("add") if args.len() >= 4 => match parse_cron_add(args) {
+                Ok((name, schedule, prompt, retries, backoff)) => cron
+                    .store()
+                    .add(name, schedule, prompt, retries, backoff)
+                    .await
+                    .map(|job| {
+                        format!(
+                            "已添加 {} [{}]，下次运行 {}",
+                            job.name, job.id, job.next_run_at
+                        )
+                    }),
+                Err(error) => Err(error),
+            },
+            Some("enable") if args.len() == 2 => cron
+                .store()
+                .set_enabled(&args[1], true)
+                .await
+                .map(|job| format!("已启用 {}", job.name)),
+            Some("disable") if args.len() == 2 => cron
+                .store()
+                .set_enabled(&args[1], false)
+                .await
+                .map(|job| format!("已停用 {}", job.name)),
+            Some("run-now") if args.len() == 2 => cron.run_now(&args[1]).await.map(|run| {
+                format!(
+                    "立即运行{}（尝试 {} 次）：{}",
+                    if run.success { "成功" } else { "失败" },
+                    run.attempts,
+                    run.result
+                )
+            }),
+            Some("remove") if args.len() == 3 && args[2] == "--confirm" => cron
+                .store()
+                .remove(&args[1])
+                .await
+                .map(|job| format!("已删除 {}", job.name)),
+            Some("remove") if args.len() == 2 => Err(anyhow::anyhow!(
+                "删除需要显式确认：/cron remove {} --confirm",
+                args[1]
+            )),
+            _ => Err(anyhow::anyhow!(
+                "用法：/cron list | add <name> interval=<秒>|cron=<分,时,日,月,周> [--retries=N] [--backoff=N] <prompt> | enable|disable|run-now <ID或名称> | remove <ID或名称> --confirm"
+            )),
+        };
+        SlashResponse::Text {
+            content: match result {
+                Ok(content) => content,
+                Err(error) => format!("Cron 命令失败：{error:#}"),
+            },
+        }
+    }
+
+    async fn execute_mcp_command(&self, args: &[String]) -> SlashResponse {
+        let Some(mcp) = self.mcp.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未启用 MCP 管理器。".to_owned(),
+            };
+        };
+        let content = match args {
+            [command] if command == "reload" => {
+                mcp.reload().await;
+                format_mcp_status(&mcp.status(), true)
+            }
+            [command] if command == "status" => format_mcp_status(&mcp.status(), true),
+            [command] if command == "list" => format_mcp_status(&mcp.status(), false),
+            _ => "MCP 命令失败：用法：/mcp list | status | reload".to_owned(),
+        };
+        SlashResponse::Text { content }
+    }
+
     async fn handle_subscribe(
         self: Arc<Self>,
         request: JsonRpcRequest,
@@ -406,6 +686,66 @@ impl DaemonState {
         token.cancel();
         self.approvals.cancel_request(request_id).await;
         Ok(json!({"cancelled": true}))
+    }
+}
+
+fn parse_cron_add(args: &[String]) -> anyhow::Result<(String, ScheduleSpec, String, u32, u64)> {
+    let name = args[1].clone();
+    let schedule = if let Some(seconds) = args[2].strip_prefix("interval=") {
+        ScheduleSpec::Interval {
+            seconds: seconds.parse().context("interval 必须是正整数秒")?,
+        }
+    } else if let Some(expression) = args[2].strip_prefix("cron=") {
+        ScheduleSpec::Cron {
+            expression: expression.replace(',', " "),
+        }
+    } else {
+        anyhow::bail!("schedule 必须是 interval=<秒> 或 cron=<分,时,日,月,周>");
+    };
+    let mut retries = 0_u32;
+    let mut backoff = 5_u64;
+    let mut prompt = Vec::new();
+    for argument in &args[3..] {
+        if let Some(value) = argument.strip_prefix("--retries=") {
+            retries = value.parse().context("--retries 必须是非负整数")?;
+        } else if let Some(value) = argument.strip_prefix("--backoff=") {
+            backoff = value.parse().context("--backoff 必须是非负整数秒")?;
+        } else {
+            prompt.push(argument.as_str());
+        }
+    }
+    if prompt.is_empty() {
+        anyhow::bail!("cron prompt 不能为空");
+    }
+    Ok((name, schedule, prompt.join(" "), retries, backoff))
+}
+
+fn format_mcp_status(status: &crate::mcp::McpStatus, include_errors: bool) -> String {
+    let mut lines = Vec::new();
+    if let Some(error) = &status.file_error {
+        lines.push(format!("配置错误：{error}"));
+    }
+    for server in &status.servers {
+        let state = if server.connected {
+            "已连接"
+        } else {
+            "不可用"
+        };
+        let tools = if server.tools.is_empty() {
+            "无工具".to_owned()
+        } else {
+            server.tools.join("、")
+        };
+        let mut line = format!("{}：{} · {}", server.name, state, tools);
+        if include_errors && let Some(error) = &server.error {
+            line.push_str(&format!(" · {error}"));
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        "未配置 MCP server（期望 .my-agent/mcp.json）。".to_owned()
+    } else {
+        lines.join("\n")
     }
 }
 

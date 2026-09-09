@@ -4,12 +4,12 @@
 
 ## 功能
 
-- OpenAI Chat Completions 兼容 Provider：解析 SSE 文本增量及分片 function calling，并记录 OpenAI/DeepSeek 缓存命中字段。
+- 多 Provider：原生支持 OpenAI Chat Completions、Anthropic Messages 与 Ollama；协议差异封装在各自适配器内，统一输出文本与严格 tool-call 生命周期事件。
 - 全屏终端 TUI：默认继承终端前景/背景，兼容浅色、深色和自定义主题；可选真彩深色主题。界面居中限宽，支持 Markdown 标题/粗体/代码排版、工具详情收起、中文换行滚动、流式文本、独立审批面板和可见输入光标。
 - 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
 - `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
-- `.my-agent/skills/*.md` 技能库只常驻标题/摘要索引，按关键词和中文 bigram 最多加载 3 个命中正文。
+- `.my-agent/skills/*.md` 使用 YAML frontmatter 与 semver；元数据常驻索引，正文按需加载，支持相关性稳定排序及 `/skill` 本地安装、更新、删除。
 - 三条记忆链路：append-only 会话、60%/85% 两级上下文摘要、TTL 长期记忆。
 - 每次启动 TUI 或 REPL 都创建空白 session；历史会话保留稳定 ID，可用 `/resume` 查看摘要并按编号或 ID 恢复。
 - JSON Schema 参数校验、统一路径边界、灾难命令硬拒、跨工作区写入和高风险命令审批。
@@ -19,8 +19,10 @@
 - 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；同一服务的 `/ws` 提供全双工 JSON-RPC、事件流和交互审批；非回环监听必须配置 Bearer Token。
 - 编辑器入口实现标准 ACP v1（`agent-client-protocol`），支持 initialize、session/new/load、prompt、cancel、工具更新和 typed 权限请求。
 - 连接断开后可恢复：daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；ACP `session/load` 与 WebSocket 重连可继续消费，不会因断线自动批准或拒绝。
+- 本地 Cron：`.my-agent/cron.json` 原子持久化 interval/五段 cron 任务，使用独立 session、有限指数退避和无人值守安全拒绝；可选 heartbeat 不调用模型。
+- MCP stdio 客户端：从 `.my-agent/mcp.json` 启动并握手本地 server，将发现的工具动态桥接为 `mcp__<server>__<tool>`；配置/server 错误隔离，调用默认审批，daemon 退出时清理子进程。
 
-cron 和 MCP 仍是未实现的可选扩展。本项目也不提供多租户、RBAC、容器沙箱、向量数据库或企业连接器。
+本项目不提供多租户、RBAC、容器沙箱、向量数据库或远程 MCP transport。
 
 ## 请求链路
 
@@ -32,13 +34,13 @@ TUI / CLI / HTTP+WebSocket / 标准 ACP stdio
           │  NDJSON JSON-RPC / Unix Domain Socket
           ▼
      DaemonState（唯一真相）
-          │  history / session / plan / approvals / cancellation
+          │  history / session / plan / approvals / cron / MCP
           ▼
       LoopEngine ReAct
           │
           ├─ 稳定前缀 → 历史 → 动态上下文 → 两级压缩
-          ├─ Provider SSE → text.delta / tool calls
-          ├─ 参数校验 → 安全决策 → 审批事件
+          ├─ Provider SSE/NDJSON → canonical tool-call assembler
+          ├─ 整批参数校验 → 安全决策 → 审批事件
           ├─ 只读并行 / 副作用串行 → tool_call_id 回填
           └─ assistant 落盘 → completed 事件 → 最终 Response
 ```
@@ -56,7 +58,7 @@ src/daemon/
   protocol.rs              JSON-RPC 请求/响应/事件帧 SSOT，4 MiB 上限
   handlers.rs              chat/session/approval/cancel/subscribe/stop 方法
   approval.rs              可挂起、可重连查看的审批中介
-  runtime.rs               Provider、工具、上下文、会话统一装配
+  runtime.rs               Provider、工具、上下文、会话、Cron、MCP 统一装配
   lifecycle.rs             工作区运行目录、PID/ready、探测与自动拉起
   server.rs                内存回环与 Unix socket server
 src/entry/
@@ -65,7 +67,10 @@ src/entry/
   serve.rs                 health、OpenAI 兼容 HTTP/SSE 与全双工 WebSocket
   editor.rs                标准 ACP v1 stdio server、恢复与权限请求
 src/entry/recovery.rs      入口共享的 session new/list/load/resume 与 active subscribe helper
-src/provider.rs            Provider trait、OpenAI 兼容请求与 SSE
+src/provider.rs            Provider 公共契约、能力与 execution identity
+src/provider/              OpenAI、Anthropic、Ollama wire 适配及闭环测试
+src/tool_calls.rs          工具调用生命周期的唯一装配器
+src/slash.rs               slash 命令注册表、参数规则、帮助与响应 SSOT
 src/loop_engine.rs         ReAct、事件、取消、工具波次与结果回填
 src/context.rs             上下文排序、环境、Skill、估算与压缩
 src/safety.rs              文件与命令的唯一安全决策点
@@ -73,8 +78,10 @@ src/session.rs             稳定 ID 的独立 JSONL 会话、当前指针、摘
 src/memory.rs              TTL 长期记忆与关键词/bigram 召回
 src/plan.rs                当前计划及原子 JSON 持久化
 src/sub_agent.rs           独立历史、受限工具的子 Agent
-src/skills.rs              Markdown Skill 索引与按需加载
-src/tools/                 Tool trait、注册表与文件/命令工具
+src/skills.rs              版本化 Skill 索引、排序及本地安装器
+src/cron.rs                持久化调度、独立执行、重试与 heartbeat
+src/mcp.rs                 自研 MCP stdio JSON-RPC、发现、桥接与生命周期
+src/tools/                 Tool trait、静态/动态注册表与文件/命令工具
 ```
 
 ## 构建与配置
@@ -84,9 +91,15 @@ src/tools/                 Tool trait、注册表与文件/命令工具
 ```bash
 cargo build --release
 
+# OpenAI 兼容服务（默认 API_TYPE=openai-chat）
+export API_TYPE='openai-chat'
 export OPENAI_API_KEY='你的密钥'
 export OPENAI_BASE_URL='https://api.deepseek.com'
 export MODEL_NAME='你的模型名'
+
+# 或本地 Ollama（不需要 API key/base URL）
+# export API_TYPE='ollama'
+# export MODEL_NAME='qwen3'
 
 ./target/release/my-agent config check
 ```
@@ -97,6 +110,9 @@ export MODEL_NAME='你的模型名'
 
 | 环境变量 | 默认值 | 作用 |
 |---|---:|---|
+| `API_TYPE` | `openai-chat` | `openai-chat`、`anthropic-messages` 或 `ollama` |
+| `OPENAI_BASE_URL` | Ollama 为 `http://127.0.0.1:11434` | 对应 Provider 的服务根 URL |
+| `OLLAMA_TOOLS_ENABLED` | `true` | 是否向 Ollama 暴露工具 |
 | `CONTEXT_TOKEN_BUDGET` | `32000` | 上下文 token 预算，最小 256 |
 | `CONTEXT_RECENT_MESSAGES` | `12` | 强压缩时保留的最近消息数 |
 | `CONTEXT_MILD_PERCENT` | `60` | 温和压缩触发水位 |
@@ -105,7 +121,13 @@ export MODEL_NAME='你的模型名'
 | `MEMORY_PATH` | `.my-agent/memory.jsonl` | 长期记忆路径 |
 | `PLAN_PATH` | `.my-agent/plan.json` | 计划路径；`off` 表示仅内存 |
 | `SKILLS_DIR` | `.my-agent/skills` | Markdown Skill 目录 |
+| `SKILLS_MAX_MATCHES` | `3` | 每轮最多加载的 Skill 正文数 |
 | `MULTIMODAL_ENABLED` | 按模型名检测 | 显式启用/关闭图片内容块 |
+| `CRON_TICK_SECONDS` | `1` | Cron 调度检查间隔 |
+| `CRON_STAGGER_SECONDS` | `2` | 同时到期任务之间的错峰秒数 |
+| `CRON_RUN_TIMEOUT_SECS` | `600` | 单次定时任务超时 |
+| `HEARTBEAT_ENABLED` | `false` | 启用不调用模型的轻量自检 |
+| `HEARTBEAT_INTERVAL_SECS` | `300` | Heartbeat 间隔 |
 | `MY_AGENT_RUNTIME_DIR` | 系统临时目录 | daemon socket/PID/ready/log 根目录 |
 | `MY_AGENT_API_TOKEN` | 未设置 | HTTP Bearer Token；非回环监听必填 |
 | `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；默认继承终端颜色，`dark` 启用内置真彩深色主题 |
@@ -138,7 +160,35 @@ curl http://127.0.0.1:8787/health
 ./target/release/my-agent editor
 ```
 
-TUI 和 REPL 每次启动都会进入一个全新空白 session，不会自动显示旧对话。输入 `/resume` 可查看带编号、消息数和首条问题摘要的历史列表；输入编号或 `/resume <session-id>` 即可恢复。另支持 `/help`、`/status`、`/sessions`、`/new`、`/cancel`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
+TUI 和 REPL 每次启动都会进入一个全新空白 session，不会自动显示旧对话。输入 `/resume` 可查看带编号、消息数和首条问题摘要的历史列表；输入编号或 `/resume <session-id>` 即可恢复。`/help` 从共享注册表自动生成，另有 `/status`、`/sessions`、`/new`、`/cancel`、`/skill`、`/cron`、`/mcp`、`/ping`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
+
+Cron 示例：
+
+```text
+/cron add nightly cron=0,2,*,*,* --retries=2 --backoff=10 检查项目并生成报告
+/cron add quick interval=300 执行轻量巡检
+/cron list
+/cron run-now quick
+/cron disable quick
+/cron remove quick --confirm
+```
+
+MCP 配置示例（`command` 与 env key 不展开占位符；只在 `args`、env value、`cwd` 展开环境变量及 `${WORKSPACE_ROOT}`）：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT}"],
+      "env": {},
+      "cwd": "${WORKSPACE_ROOT}"
+    }
+  }
+}
+```
+
+保存后执行 `/mcp reload`；`/mcp list` 查看工具，`/mcp status` 查看逐 server 错误。当前只支持本地 stdio，不支持 streamable-http/SSE MCP。
 
 TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；PageUp/PageDown 查看历史，Ctrl+T 展开/收起工具详情，Ctrl+U 清空草稿，Ctrl+C 取消当前请求。Esc 随时退出界面，空闲时也可输入 `/exit`；退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
 
@@ -156,7 +206,7 @@ HTTP 入口不能弹终端审批，因此遇到需要批准的操作会安全地
 
 ## 安全边界
 
-这是软安全边界，不是操作系统沙箱。`rm -rf /`、`mkfs`、块设备覆盖、fork 炸弹等会直接拒绝；`kill`、`sudo`、`git reset --hard`、跨工作区写入等会请求审批。Shell 命令仍以当前用户权限执行，应只在可信工作区运行。
+这是软安全边界，不是操作系统沙箱。`rm -rf /`、`mkfs`、块设备覆盖、fork 炸弹等会直接拒绝；`kill`、`sudo`、`git reset --hard`、跨工作区写入等会请求审批。MCP server 本身以当前用户权限启动，因此只应写入可信配置；每次 MCP 工具调用默认视为有副作用并审批，参数中的灾难命令仍硬拒、路径边界会进入审批提示。Cron 使用独立的无人值守审批器，任何需审批动作都拒绝。
 
 图片限制 16 MiB，base64 只存在于当前 turn 的临时消息，不写 session。PDF 限制 16 MiB、50 页和约 512K 字符，不做视觉渲染。
 

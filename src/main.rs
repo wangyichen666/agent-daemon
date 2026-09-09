@@ -1,16 +1,20 @@
 mod client;
 mod config;
 mod context;
+mod cron;
 mod daemon;
 mod entry;
 mod loop_engine;
+mod mcp;
 mod memory;
 mod plan;
 mod provider;
 mod safety;
 mod session;
 mod skills;
+mod slash;
 mod sub_agent;
+mod tool_calls;
 mod tools;
 
 use std::net::SocketAddr;

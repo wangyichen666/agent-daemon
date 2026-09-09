@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 use crate::plan::PlanStore;
 use crate::provider::{Message, Provider, Response, Role, ToolSpec};
 use crate::skills::SkillLibrary;
+use crate::tool_calls::collect_provider_response;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "你是一个个人 AI 编码 Agent。先理解任务，再按需调用工具；工具失败时根据错误调整方案；任务完成后给出简洁、可核验的最终回答。面对需要三个或更多步骤的复杂任务，先调用 plan 的 set 制定计划，开始和完成每一步时用 update 更新状态，必要时用 add 调整；简单单步任务不要使用 plan，避免形式主义。若动态上下文提供了命中的技能正文，应把它作为当前任务的工作方法；未命中的技能只有索引，不要假装已读取其正文。";
 const DEFAULT_TOKEN_BUDGET: usize = 32_000;
@@ -62,6 +63,7 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
+    #[cfg(test)]
     pub fn new(
         provider: Arc<dyn Provider>,
         workspace: impl AsRef<Path>,
@@ -71,6 +73,23 @@ impl ContextManager {
         Self::with_system_prompt(provider, workspace, config, plan, DEFAULT_SYSTEM_PROMPT)
     }
 
+    pub fn new_with_skills(
+        provider: Arc<dyn Provider>,
+        workspace: impl AsRef<Path>,
+        config: ContextConfig,
+        plan: Arc<PlanStore>,
+        skills: SkillLibrary,
+    ) -> Result<Self> {
+        Self::build(
+            provider,
+            workspace,
+            config,
+            plan,
+            DEFAULT_SYSTEM_PROMPT,
+            Some(skills),
+        )
+    }
+
     pub fn with_system_prompt(
         provider: Arc<dyn Provider>,
         workspace: impl AsRef<Path>,
@@ -78,10 +97,21 @@ impl ContextManager {
         plan: Arc<PlanStore>,
         system_prompt: impl Into<String>,
     ) -> Result<Self> {
+        Self::build(provider, workspace, config, plan, system_prompt, None)
+    }
+
+    fn build(
+        provider: Arc<dyn Provider>,
+        workspace: impl AsRef<Path>,
+        config: ContextConfig,
+        plan: Arc<PlanStore>,
+        system_prompt: impl Into<String>,
+        skills: Option<SkillLibrary>,
+    ) -> Result<Self> {
         let workspace = std::fs::canonicalize(workspace.as_ref())
             .with_context(|| format!("无法解析上下文工作区: {}", workspace.as_ref().display()))?;
         let project_rules = load_project_rules(&workspace)?;
-        let skills = SkillLibrary::from_env(&workspace);
+        let skills = skills.unwrap_or_else(|| SkillLibrary::from_env(&workspace));
         Ok(Self {
             provider,
             workspace,
@@ -258,9 +288,14 @@ impl ContextManager {
             ),
             Message::text(Role::User, source),
         ];
-        match self.provider.chat(&messages, &[]).await? {
+        match collect_provider_response(self.provider.as_ref(), &messages, &[]).await? {
             Response::Text(summary) => Ok(summary),
             Response::ToolCalls(_) => bail!("模型在上下文压缩时返回了工具调用"),
+            Response::ToolAssemblyFailed(error) => bail!(
+                "模型在上下文压缩时产生无效工具调用（{}）：{}",
+                error.code,
+                error.message
+            ),
         }
     }
 }
@@ -588,7 +623,7 @@ mod tests {
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::write(
             skills_dir.join("rust-testing.md"),
-            "# Rust 测试\nsummary: 用 cargo test 验证 Rust 项目\n\n## 流程\nONLY_MATCHED_BODY\n",
+            "---\nname: rust-testing\nversion: 1.0.0\ndescription: 用 cargo test 验证 Rust 项目\nkeywords: [Rust, 单元测试]\nscope: [rust]\n---\n# Rust 测试\n\n## 流程\nONLY_MATCHED_BODY\n",
         )
         .unwrap();
         let provider = Arc::new(SummaryProvider {
@@ -625,7 +660,7 @@ mod tests {
         assert!(matched_dynamic.contains("可用技能索引"));
         assert!(matched_dynamic.contains("ONLY_MATCHED_BODY"));
         let unmatched_dynamic = unmatched.last().unwrap().content.as_deref().unwrap();
-        assert!(unmatched_dynamic.contains("rust-testing · Rust 测试"));
+        assert!(unmatched_dynamic.contains("rust-testing@1.0.0"));
         assert!(!unmatched_dynamic.contains("ONLY_MATCHED_BODY"));
         std::fs::remove_dir_all(workspace).unwrap();
     }

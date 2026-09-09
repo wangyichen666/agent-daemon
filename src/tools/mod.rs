@@ -19,9 +19,20 @@ pub use read::ReadFileTool;
 pub use write::WriteFileTool;
 
 #[derive(Debug, Error)]
-enum ToolError {
-    #[error("工具参数校验失败: {0}")]
-    InvalidArguments(String),
+pub enum ToolAdmissionError {
+    #[error("未知工具: {0}")]
+    UnknownTool(String),
+    #[error("工具 {tool} 参数校验失败: {message}")]
+    InvalidArguments { tool: String, message: String },
+}
+
+impl ToolAdmissionError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownTool(_) => "unknown_tool",
+            Self::InvalidArguments { .. } => "invalid_arguments",
+        }
+    }
 }
 
 #[async_trait]
@@ -37,6 +48,11 @@ pub trait Tool: Send + Sync {
     async fn execute_rich(&self, args: Value) -> Result<ToolOutput> {
         self.execute(args).await.map(ToolOutput::text)
     }
+}
+
+pub trait DynamicToolSource: Send + Sync {
+    fn specs(&self) -> Vec<ToolSpec>;
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>>;
 }
 
 pub struct ToolOutput {
@@ -56,6 +72,7 @@ impl ToolOutput {
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    dynamic_sources: Vec<Arc<dyn DynamicToolSource>>,
 }
 
 impl ToolRegistry {
@@ -68,6 +85,13 @@ impl ToolRegistry {
         T: Tool + 'static,
     {
         self.tools.insert(tool.name().to_owned(), Arc::new(tool));
+    }
+
+    pub fn register_dynamic_source<T>(&mut self, source: Arc<T>)
+    where
+        T: DynamicToolSource + 'static,
+    {
+        self.dynamic_sources.push(source);
     }
 
     pub fn subset<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Result<Self> {
@@ -91,24 +115,56 @@ impl ToolRegistry {
                 parameters: tool.parameters(),
             })
             .collect::<Vec<ToolSpec>>();
+        specs.extend(
+            self.dynamic_sources
+                .iter()
+                .flat_map(|source| source.specs()),
+        );
         specs.sort_by(|left: &ToolSpec, right: &ToolSpec| left.name.cmp(&right.name));
         specs
     }
 
     pub async fn execute(&self, name: &str, args: Value) -> Result<ToolOutput> {
-        let Some(tool) = self.tools.get(name) else {
-            bail!("未知工具: {name}");
-        };
-        validate_value(&tool.parameters(), &args, "$args")?;
+        self.admit(name, &args)?;
+        let tool = self
+            .resolve(name)
+            .ok_or_else(|| ToolAdmissionError::UnknownTool(name.to_owned()))?;
         tool.execute_rich(args).await
     }
 
+    pub fn admit_all(&self, calls: &[crate::provider::ToolCall]) -> Result<(), ToolAdmissionError> {
+        for call in calls {
+            self.admit(&call.name, &call.arguments)?;
+        }
+        Ok(())
+    }
+
+    fn admit(&self, name: &str, args: &Value) -> Result<(), ToolAdmissionError> {
+        let Some(tool) = self.resolve(name) else {
+            return Err(ToolAdmissionError::UnknownTool(name.to_owned()));
+        };
+        validate_value(&tool.parameters(), args, "$args").map_err(|message| {
+            ToolAdmissionError::InvalidArguments {
+                tool: name.to_owned(),
+                message,
+            }
+        })
+    }
+
     pub fn is_read_only(&self, name: &str) -> bool {
-        self.tools.get(name).is_some_and(|tool| tool.is_read_only())
+        self.resolve(name).is_some_and(|tool| tool.is_read_only())
+    }
+
+    fn resolve(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned().or_else(|| {
+            self.dynamic_sources
+                .iter()
+                .find_map(|source| source.get(name))
+        })
     }
 }
 
-fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<()> {
+fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
     if let Some(expected) = schema.get("type").and_then(Value::as_str) {
         let valid = match expected {
             "object" => value.is_object(),
@@ -121,7 +177,7 @@ fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<()> {
             _ => true,
         };
         if !valid {
-            return Err(ToolError::InvalidArguments(format!("{path} 应为 {expected}")).into());
+            return Err(format!("{path} 应为 {expected}"));
         }
     }
 
@@ -131,9 +187,7 @@ fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<()> {
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         for name in required.iter().filter_map(Value::as_str) {
             if !object.contains_key(name) {
-                return Err(
-                    ToolError::InvalidArguments(format!("{path} 缺少必填字段 {name}")).into(),
-                );
+                return Err(format!("{path} 缺少必填字段 {name}"));
             }
         }
     }
@@ -144,9 +198,7 @@ fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<()> {
             if let Some(child_schema) = properties.get(name) {
                 validate_value(child_schema, child, &format!("{path}.{name}"))?;
             } else if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
-                return Err(
-                    ToolError::InvalidArguments(format!("{path} 不允许额外字段 {name}")).into(),
-                );
+                return Err(format!("{path} 不允许额外字段 {name}"));
             }
         }
     }
