@@ -132,3 +132,7 @@
 - 首次 ACP 恢复测试因新 session 尚无 JSONL 文件被错误拒绝；open_session 已允许当前新建的空 session，恢复链路重新通过。
 - 首次并发测试发现 snapshot 读取可能早于 user append flush；测试改为短轮询，生产路径继续保持 append-only flush 后可恢复。
 - 多窗口实现阶段验收：`cargo test --all-targets` 106/106 通过，严格 Clippy 通过；待完成 fmt、release、安装并验证 `myagent`。
+- 2026-09-09 OpenClaude 对比完成：确认其前后台 session 分层、QueryEngine/消息队列拆分、goal 状态机与稳定 ID 恢复模式；结合当前 daemon/TUI 架构选择三项低侵入高收益改进。
+- 已实现：turn lock 获取支持 cancellation select；PlanStore 的 set/update/add 使用串行 mutation lock；session.list/CLI/TUI 增加 idle/running/waiting 与 active_requests 实时状态，审批等待单独显示 waiting。
+- 新增回归：排队请求取消、计划并发更新、独立 session 活动状态；定向测试通过，全量 `cargo test` 109/109 通过，严格 Clippy 已通过。
+- 最终验收完成：`cargo fmt --all -- --check`、`git diff --check`、`cargo test --all-targets`（109/109）、严格 Clippy、`cargo build --release` 全部通过；`cargo install --path . --force` 已完成，`myagent --version`/`myagent status` 验证为 0.1.0/stopped，命令链接到当前 release 二进制。

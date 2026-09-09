@@ -265,3 +265,22 @@
 - `cargo test --all-targets`：107/107 通过。
 - `cargo clippy --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check`：通过。
 - `cargo build --release` 与 `cargo install --path . --force`：通过；`myagent` 与 `my-agent` 均指向最新 release 二进制。
+
+## OpenClaude 逻辑对比与当前项目优化（2026-09-09）
+
+### 目标
+
+研究 `/Users/pilot/Desktop/github_project/openclaude-main` 的成熟逻辑，提取与当前 Rust daemon/TUI 架构兼容、能显著提升可靠性或可维护性的部分，并在保持现有安全边界和多窗口 session 隔离的前提下实现可验证的改进。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| 1. OpenClaude 架构勘察 | complete | 梳理 session、消息队列、目标/计划、权限、远程恢复、状态选择器和持久化模式 |
+| 2. 差距与取舍设计 | complete | 选择取消可中断、计划写入串行化、session 实时状态三项高收益改进 |
+| 3. 当前项目实现 | complete | 落地取消可中断、计划写入串行化、session 实时状态，并补回归测试与 CLI/TUI 展示 |
+| 4. 全量验收与交付 | complete | 109 项全量测试、clippy、fmt、diff check、release、安装和 `myagent` 命令验证通过；已准备提交并推送 |
+
+### 约束
+
+- 只提取逻辑和工程模式，不复制 OpenClaude 的 UI/品牌/闭源服务依赖。
+- 不削弱当前工具审批、路径边界、MCP 隔离、session 隔离和取消语义。
+- 每两次源码检索后把关键发现写入 findings.md；每个阶段结束更新本计划和 progress.md。

@@ -233,3 +233,19 @@
 - 首次验证发现新 session 创建若复用 workspace current pointer，会在另一个 session 活动时改变共享写入路径；已改为隔离创建并仅更新 daemon 内存中的 legacy session 选择，避免串写。
 - 首次多 session 并发测试直接断言历史条数时遇到 append 尚未 flush 的时序；改为短轮询快照后再断言，生产代码未增加等待。
 - 一次定向验证误把两个过滤器同时传给 `cargo test`，Cargo 在编译前拒绝；随后按项目既有规则改跑单个过滤器/全量 `--all-targets`，未影响生产代码。
+
+## OpenClaude 对比研究（2026-09-09，初步）
+
+- OpenClaude 把“前台会话”和“后台任务”明确分成两类：后台任务有独立的本地子进程、名称/状态/日志/终态记录和 `ps/logs/kill/attach` 控制面；这比单纯保留 daemon 内存 active map 更适合长任务恢复。
+- OpenClaude 的 `QueryEngine`/`messageQueueManager`/`queueProcessor` 将用户输入队列、停止/中断、重试与消息提交拆开，说明当前项目可进一步统一请求生命周期状态机，而不是让 TUI 自己维护一套队列语义。
+- OpenClaude 的 goal 服务把目标状态、持久化、评估器、控制器和 prompt instructions 分层，并有状态机测试；当前项目已有 PlanStore，但缺少对“目标/下一步/完成判定”的持久化控制层。
+- OpenClaude 的远程 session 管理、permission bridge 和 websocket 恢复都围绕稳定 session ID 做事件重放与权限关联；这一点与当前刚完成的 `(session_id, request_id)` 隔离方向一致，可继续提取为通用 session lifecycle/status API。
+- OpenClaude 的 goal 状态转换是纯函数，明确记录 `turnCount`、`lastEvaluatedMessageUuid`、最大轮次、暂停/完成原因，并把 evaluator 失败当作可持久化状态而不是异常退出；这是当前 PlanStore 最值得借鉴的可靠性模式。
+- OpenClaude 的 queue manager 使用“不可变快照 + 订阅通知 + 优先级 dequeue + 过滤器”，同时保留非匹配命令，能避免 React/异步消费者因队列变化丢消息；当前 TUI 只有局部 FIFO，需要抽成 daemon 可观测的队列模型。
+
+## OpenClaude 对比落地（2026-09-09）
+
+- 排队请求取消：`LoopEngine` 获取 session turn lock 时同时监听 `CancellationToken`。这样同一 session 的第二个窗口/请求在前一个 turn 长时间运行时可以立即返回“请求已取消”，不会把取消请求卡在锁等待上；新增 PendingProvider 回归测试覆盖该时序。
+- 计划写入串行化：`PlanStore` 的 `set/update/add` 共用 mutation mutex，保证“读当前状态→校验→原子持久化→替换内存状态”是单写者临界区，避免两个工具调用并发时后写入覆盖先写入的步骤更新；新增并发更新测试。
+- session 实时状态：`SessionInfo` 增加 `status`（idle/running/waiting）、`active_requests` 和兼容性 `updated_at` 字段。daemon 从活动请求表和审批 broker 实时派生状态，session.list、CLI `/sessions`、TUI 恢复选择均展示活动状态；旧 JSONL/旧 session 清单因 serde default 保持可读取。
+- 取舍：没有直接复制 OpenClaude 的后台子进程控制面或完整 goal evaluator，因为当前项目已有 cron/MCP/daemon 生命周期，先优先修复会直接影响多窗口交互可靠性的三个临界区；后台任务控制面可作为后续独立阶段。

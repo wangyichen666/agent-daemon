@@ -599,6 +599,18 @@ mod tests {
             }
             assert_eq!(snapshot["active_requests"].as_array().unwrap().len(), 1);
             assert_eq!(snapshot["messages"].as_array().unwrap().len(), 1);
+
+            let listed = crate::entry::cli::request_result(&client, "session.list", json!({}))
+                .await
+                .unwrap();
+            let info = listed["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|session| session["id"] == *session_id)
+                .expect("活动 session 应出现在 session.list");
+            assert_eq!(info["status"], "running");
+            assert_eq!(info["active_requests"], 1);
         }
 
         let new_session = tokio::time::timeout(

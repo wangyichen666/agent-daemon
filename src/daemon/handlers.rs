@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -10,6 +10,7 @@ use super::protocol::{EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, Ser
 use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
 use crate::cron::ScheduleSpec;
 use crate::loop_engine::{AgentEvent, CancellationToken};
+use crate::session::SessionStatus;
 use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
 
 const INVALID_PARAMS: i64 = -32602;
@@ -362,11 +363,19 @@ impl DaemonState {
             .into_iter()
             .filter(|approval| request_ids.contains(&approval.request_id))
             .collect::<Vec<_>>();
+        let status = if !approvals.is_empty() {
+            "waiting"
+        } else if !active_requests.is_empty() {
+            "running"
+        } else {
+            "idle"
+        };
         Ok(json!({
             "session_id": session_id,
             "messages": history,
             "pending_approvals": approvals,
             "active_requests": active_requests,
+            "status": status,
         }))
     }
 
@@ -383,6 +392,26 @@ impl DaemonState {
         let current_id = self.legacy_session_id.lock().await.clone();
         for session in &mut sessions {
             session.active = session.id == current_id;
+        }
+        let active_counts = self.active.lock().await.keys().fold(
+            HashMap::<String, usize>::new(),
+            |mut counts, key| {
+                *counts.entry(key.session_id.clone()).or_default() += 1;
+                counts
+            },
+        );
+        let pending_sessions = self.approvals.pending_sessions().await;
+        for session in &mut sessions {
+            let active_requests = active_counts.get(&session.id).copied().unwrap_or(0);
+            session.active_requests = active_requests;
+            session.status = if pending_sessions.contains(&session.id) {
+                SessionStatus::Waiting
+            } else if active_requests > 0 {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            };
+            session.updated_at = session.modified_at;
         }
         let runtimes = self
             .sessions
@@ -402,9 +431,19 @@ impl DaemonState {
                 message_count: 0,
                 modified_at: None,
                 preview: None,
+                status: if pending_sessions.contains(&runtime.id) {
+                    SessionStatus::Waiting
+                } else if active_counts.get(&runtime.id).copied().unwrap_or(0) > 0 {
+                    SessionStatus::Running
+                } else {
+                    SessionStatus::Idle
+                },
+                active_requests: active_counts.get(&runtime.id).copied().unwrap_or(0),
+                updated_at: None,
             });
         }
         if !sessions.iter().any(|session| session.id == current_id) {
+            let active_requests = active_counts.get(&current_id).copied().unwrap_or(0);
             sessions.push(crate::session::SessionInfo {
                 id: current_id.clone(),
                 path: self.session.path_for_session(&current_id),
@@ -412,6 +451,15 @@ impl DaemonState {
                 message_count: 0,
                 modified_at: None,
                 preview: None,
+                status: if pending_sessions.contains(&current_id) {
+                    SessionStatus::Waiting
+                } else if active_requests > 0 {
+                    SessionStatus::Running
+                } else {
+                    SessionStatus::Idle
+                },
+                active_requests,
+                updated_at: None,
             });
         }
         sessions.sort_by(|left, right| {

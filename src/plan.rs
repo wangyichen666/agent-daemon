@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::tools::Tool;
 
@@ -60,6 +60,7 @@ enum PlanError {
 pub struct PlanStore {
     path: Option<PathBuf>,
     state: RwLock<PlanState>,
+    mutation_lock: Mutex<()>,
 }
 
 impl PlanStore {
@@ -83,6 +84,7 @@ impl PlanStore {
         Self {
             path: None,
             state: RwLock::new(PlanState::default()),
+            mutation_lock: Mutex::new(()),
         }
     }
 
@@ -96,16 +98,19 @@ impl PlanStore {
         Ok(Self {
             path,
             state: RwLock::new(state),
+            mutation_lock: Mutex::new(()),
         })
     }
 
     pub async fn set(&self, steps: Vec<PlanStep>) -> Result<String> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         validate_steps(&steps)?;
         let next = PlanState { steps };
         self.commit(next).await
     }
 
     pub async fn update(&self, id: &str, status: PlanStatus) -> Result<String> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut next = self.state.read().await.clone();
         let Some(step) = next
             .steps
@@ -119,6 +124,7 @@ impl PlanStore {
     }
 
     pub async fn add(&self, step: PlanStep) -> Result<String> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut next = self.state.read().await.clone();
         next.steps.push(step);
         validate_steps(&next.steps)?;
@@ -351,5 +357,25 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("重复"));
         assert!(store.show().await.contains("已有"));
+    }
+
+    #[tokio::test]
+    async fn serializes_concurrent_mutations_without_losing_updates() {
+        let store = PlanStore::memory_only();
+        store
+            .set(vec![step("1", "第一步"), step("2", "第二步")])
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            store.update("1", PlanStatus::InProgress),
+            store.update("2", PlanStatus::Done),
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let shown = store.show().await;
+        assert!(shown.contains("[>] 1 · 第一步"));
+        assert!(shown.contains("[x] 2 · 第二步"));
     }
 }

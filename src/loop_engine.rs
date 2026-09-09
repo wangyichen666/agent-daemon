@@ -152,7 +152,10 @@ impl LoopEngine {
             bail!("请求已取消");
         }
         let _turn_guard = match &self.session {
-            Some(session) => Some(session.lock_turn().await),
+            Some(session) => Some(tokio::select! {
+                guard = session.lock_turn() => guard,
+                _ = cancellation.cancelled() => bail!("请求已取消"),
+            }),
             None => None,
         };
         emit(&events, AgentEvent::TurnStarted);
@@ -475,6 +478,8 @@ mod tests {
         snapshots: Mutex<Vec<Vec<Message>>>,
     }
 
+    struct PendingProvider;
+
     fn test_context(provider: Arc<dyn Provider>) -> ContextManager {
         ContextManager::new(
             provider,
@@ -508,6 +513,68 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("mock 响应不足"))
         }
+    }
+
+    #[async_trait]
+    impl Provider for PendingProvider {
+        async fn chat(&self, _messages: &[Message], _tools: &[ToolSpec]) -> Result<Response> {
+            std::future::pending::<Result<Response>>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_turn_can_be_cancelled_before_acquiring_session_lock() {
+        let provider: Arc<dyn Provider> = Arc::new(PendingProvider);
+        let engine = Arc::new(LoopEngine::new(
+            provider.clone(),
+            ToolRegistry::new(),
+            test_context(provider),
+            test_session("queued-cancel"),
+        ));
+        let first_token = CancellationToken::new();
+        let first_token_for_task = first_token.clone();
+        let (events, mut event_receiver) = mpsc::unbounded_channel();
+        let first_engine = engine.clone();
+        let first_handle = tokio::spawn(async move {
+            let mut history = Vec::new();
+            first_engine
+                .run_turn_with_events(
+                    &mut history,
+                    "第一个请求".to_owned(),
+                    Some(events),
+                    first_token_for_task,
+                )
+                .await
+        });
+        assert_eq!(event_receiver.recv().await, Some(AgentEvent::TurnStarted));
+
+        let second_token = CancellationToken::new();
+        let second_engine = engine;
+        let second_token_for_task = second_token.clone();
+        let second_handle = tokio::spawn(async move {
+            let mut history = Vec::new();
+            second_engine
+                .run_turn_with_events(
+                    &mut history,
+                    "第二个请求".to_owned(),
+                    None,
+                    second_token_for_task,
+                )
+                .await
+        });
+        second_token.cancel();
+        let second_result = tokio::time::timeout(std::time::Duration::from_secs(1), second_handle)
+            .await
+            .expect("排队请求取消不应等待第一个请求结束")
+            .expect("排队请求任务不应 panic");
+        assert_eq!(second_result.unwrap_err().to_string(), "请求已取消");
+
+        first_token.cancel();
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(1), first_handle)
+            .await
+            .expect("第一个请求应响应取消")
+            .expect("第一个请求任务不应 panic");
+        assert_eq!(first_result.unwrap_err().to_string(), "请求已取消");
     }
 
     #[tokio::test]

@@ -779,9 +779,11 @@ fn render_session_choices(sessions: &[SessionInfo], select: bool) -> String {
         let marker = if session.active { " · 当前" } else { "" };
         let preview = session.preview.as_deref().unwrap_or("无摘要");
         lines.push(format!(
-            "{}. {} · {} 条消息{marker}\n   {preview}",
+            "{}. {} · {} · {} 个活动请求 · {} 条消息{marker}\n   {preview}",
             index + 1,
             session.id,
+            session.status,
+            session.active_requests,
             session.message_count
         ));
     }

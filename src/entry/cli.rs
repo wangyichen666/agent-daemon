@@ -172,9 +172,11 @@ fn print_session_list(sessions: &[crate::session::SessionInfo]) {
     for (index, session) in sessions.iter().enumerate() {
         let marker = if session.active { "*" } else { " " };
         println!(
-            "{marker} {}. {} · {} 条消息 · {}",
+            "{marker} {}. {} · {} · {} 个活动请求 · {} 条消息 · {}",
             index + 1,
             session.id,
+            session.status,
+            session.active_requests,
             session.message_count,
             session.preview.as_deref().unwrap_or("无摘要")
         );
