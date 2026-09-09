@@ -3,9 +3,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{RenderCacheKey, ToolStatus, TuiState, TuiThemeMode, UiMessage, UiMessageKind};
 use crate::provider::Role;
@@ -117,7 +117,12 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         vec![Line::from(theme.text(state.input.text(), theme.foreground))],
         width.saturating_sub(4),
     );
-    let input_height = (input_lines.len() as u16).clamp(1, 4) + 2;
+    let max_input_lines = content
+        .height
+        .saturating_div(2)
+        .saturating_sub(2)
+        .clamp(1, 8);
+    let input_height = (input_lines.len() as u16).clamp(1, max_input_lines) + 2;
     let approval_lines = state
         .pending_approvals
         .front()
@@ -136,10 +141,11 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             .max(4)
     };
     let regions = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Min(1),
         Constraint::Length(approval_height),
         Constraint::Length(input_height),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(content);
@@ -150,6 +156,7 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or("workspace");
+    let session_label = short_id(&state.session_id, 18);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
@@ -157,10 +164,11 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
                     "✦ my-agent",
                     theme.style(theme.info).add_modifier(Modifier::BOLD),
                 ),
-                theme.text("   /   ", theme.border),
+                theme.text("  ·  ", theme.border),
                 theme.text(workspace, theme.foreground),
+                theme.muted_text(format!("  ·  session {session_label}")),
             ]),
-            Line::from(theme.muted_text("你的终端编码助手 · 对话、规划、执行")),
+            Line::from(theme.muted_text("对话 · 规划 · 工具执行   ·   F1 查看快捷键")),
         ]),
         regions[0],
     );
@@ -205,6 +213,28 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         Paragraph::new(visible).style(theme.style(theme.foreground)),
         regions[1],
     );
+    if !state.follow_bottom {
+        let label = if state.unread_messages == 0 {
+            "↥ 回到底部".to_owned()
+        } else {
+            format!("↥ {} 条新消息 · 回到底部", state.unread_messages)
+        };
+        let pill_width = (label.width() as u16 + 4).min(regions[1].width);
+        let pill = Rect::new(
+            regions[1].x + regions[1].width.saturating_sub(pill_width) / 2,
+            regions[1].y + regions[1].height.saturating_sub(1),
+            pill_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("  {label}  "),
+                theme.style(theme.info).add_modifier(Modifier::BOLD),
+            )))
+            .style(theme.style(theme.info)),
+            pill,
+        );
+    }
 
     if !approval_lines.is_empty() {
         let mut lines = approval_lines;
@@ -299,24 +329,121 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             inner.y + (cursor_row as u16).min(inner.height - 1),
         ));
     }
-    let status = if state.scroll > 0 {
-        format!("↑ 历史 · 距底部 {} 行", state.scroll)
-    } else {
-        format!("● {}", state.status)
-    };
+    let status = status_line(state, theme, width);
     let footer = if width >= 90 {
-        format!(
-            "{status}    Enter 发送 · Alt↵ 换行 · PgUp/Dn 翻页 · Ctrl+↑↓ 滚动 · Ctrl+Home/End 首尾 · Esc 退出"
-        )
+        "Enter 发送 · Alt↵ 换行 · PgUp/Dn 翻页 · Ctrl+↑↓ 滚动 · Ctrl+End 回底 · F1 帮助 · Esc 退出"
+            .to_owned()
     } else if width >= 55 {
-        format!("{status}   Enter 发送 · Ctrl+C 取消 · Esc 退出")
+        "Enter 发送 · Ctrl+C 取消 · Ctrl+End 回底 · F1 帮助 · Esc 退出".to_owned()
     } else {
-        "Enter 发送 · Esc 退出".to_owned()
+        "Enter 发送 · F1 帮助 · Esc 退出".to_owned()
     };
     frame.render_widget(
-        Paragraph::new(footer).style(theme.muted_style()),
+        Paragraph::new(status).style(theme.muted_style()),
         regions[4],
     );
+    frame.render_widget(
+        Paragraph::new(footer).style(theme.muted_style()),
+        regions[5],
+    );
+
+    if state.show_help {
+        render_help(frame, state, theme, content);
+    }
+}
+
+fn status_line(state: &TuiState, theme: Theme, width: u16) -> Line<'static> {
+    let state_text = if state.scroll > 0 {
+        format!("↑ 历史 · 距底部 {} 行", state.scroll)
+    } else {
+        state.status.clone()
+    };
+    let activity = if state.pending_approvals.is_empty() {
+        format!(
+            "{} 活动 · {} 排队",
+            state.active_turns.len(),
+            state.queued_turns.len()
+        )
+    } else {
+        format!("{} 个审批待处理", state.pending_approvals.len())
+    };
+    let compact = truncate_text(&state_text, usize::from(width.saturating_sub(28)));
+    Line::from(vec![
+        Span::styled("● ", theme.style(theme.success)),
+        Span::styled(compact, theme.style(theme.foreground)),
+        theme.muted_text(format!("   {activity}")),
+    ])
+}
+
+fn render_help(frame: &mut Frame<'_>, state: &TuiState, theme: Theme, content: Rect) {
+    let width = content.width.min(72);
+    let height = content.height.min(18);
+    let area = Rect::new(
+        content.x + content.width.saturating_sub(width) / 2,
+        content.y + content.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let lines = vec![
+        Line::from(Span::styled(
+            "快捷键",
+            theme.style(theme.info).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Enter        发送消息"),
+        Line::from("Alt+Enter    插入换行"),
+        Line::from("↑ / ↓        浏览输入历史"),
+        Line::from("Ctrl+↑ / ↓   滚动对话"),
+        Line::from("Ctrl+Home    跳到对话顶部"),
+        Line::from("Ctrl+End     回到底部"),
+        Line::from("Ctrl+T       展开/收起工具输出"),
+        Line::from("Ctrl+K       清空排队消息"),
+        Line::from("Ctrl+C       取消当前请求"),
+        Line::from("F1 / Ctrl+/  打开/关闭帮助"),
+        Line::from("Esc          关闭帮助 / 退出"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("当前 session: {}", short_id(&state.session_id, 32)),
+            theme.muted_style(),
+        )),
+    ];
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.style(theme.foreground))
+            .block(
+                Block::default()
+                    .title(" 帮助 ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(theme.style(theme.info))
+                    .style(theme.style(theme.foreground)),
+            ),
+        area,
+    );
+}
+
+fn short_id(value: &str, max_width: usize) -> String {
+    truncate_text(value, max_width)
+}
+
+fn truncate_text(value: &str, max_width: usize) -> String {
+    if value.width() <= max_width {
+        return value.to_owned();
+    }
+    let limit = max_width.saturating_sub(1);
+    let mut used = 0;
+    let mut result = String::new();
+    for character in value.chars() {
+        let width = character.width().unwrap_or(0);
+        if used + width > limit {
+            break;
+        }
+        result.push(character);
+        used += width;
+    }
+    result.push('…');
+    result
 }
 
 fn cached_message_lines(
@@ -396,14 +523,10 @@ fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Lin
             format!(" · {}↑/{}↓", usage.input, usage.output)
         });
     let label = format!("{label} · #{} · {age}s{usage}", message.id);
-    let mut lines = vec![
-        Line::default(),
-        Line::from(Span::styled(
-            label,
-            theme.style(color).add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        label,
+        theme.style(color).add_modifier(Modifier::BOLD),
+    ))];
     let mut code = false;
     for source in content.lines() {
         let trimmed = source.trim_start();
@@ -411,10 +534,10 @@ fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Lin
             code = !code;
             if code {
                 lines.push(Line::from(
-                    theme.muted_text(format!("  ┌ {}", trimmed.trim_start_matches('`'))),
+                    theme.muted_text(format!("  ┌─ {}", trimmed.trim_start_matches('`'))),
                 ));
             } else {
-                lines.push(Line::from(theme.muted_text("  └")));
+                lines.push(Line::from(theme.muted_text("  └─")));
             }
         } else if code {
             lines.push(Line::from(vec![
@@ -451,12 +574,17 @@ fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Lin
             } else {
                 theme.style(theme.foreground)
             };
-            let mut spans = vec![theme.text("  ", theme.foreground)];
+            let prefix = if message.role == Role::Assistant {
+                "  │ "
+            } else {
+                "  "
+            };
+            let mut spans = vec![theme.text(prefix, theme.foreground)];
             spans.extend(inline(&body, base, theme));
             lines.push(Line::from(spans));
         }
     }
-    lines.push(Line::default());
+    lines.push(Line::from(theme.muted_text("  ·")));
     lines
 }
 
@@ -684,6 +812,19 @@ mod tests {
             assert!(cells.iter().any(|cell| cell.fg == theme.info));
             assert!(cells.iter().any(|cell| cell.fg == theme.success));
         }
+    }
+
+    #[test]
+    fn renders_help_overlay_with_shortcuts() {
+        let mut state = fixture();
+        state.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("快捷键"));
+        assert!(compact.contains("Ctrl+C"));
+        assert!(compact.contains("当前session"));
     }
 
     fn rgb(color: Color) -> String {

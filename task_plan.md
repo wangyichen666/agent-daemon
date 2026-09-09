@@ -284,3 +284,28 @@
 - 只提取逻辑和工程模式，不复制 OpenClaude 的 UI/品牌/闭源服务依赖。
 - 不削弱当前工具审批、路径边界、MCP 隔离、session 隔离和取消语义。
 - 每两次源码检索后把关键发现写入 findings.md；每个阶段结束更新本计划和 progress.md。
+
+## OpenClaude TUI 对比与当前 TUI 优化（2026-09-09）
+
+### 目标
+
+参考 OpenClaude 的 REPL/Ink 交互结构，改善当前 ratatui TUI 的信息层级、输入区、状态反馈、滚动体验和窄终端可读性，同时保持现有 daemon/session/审批协议不变。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| 1. TUI 现状与 OpenClaude 研究 | complete | 对比消息列表、工具反馈、prompt/footer、状态线、快捷键与滚动模型 |
+| 2. 视觉与交互方案 | complete | 选择分层 transcript、动态 prompt、sticky 新消息提示、状态线和帮助浮层 |
+| 3. 当前 TUI 实现 | complete | 已落地层级化 transcript、动态 prompt/footer、状态 pills、快捷键帮助与窗口适配 |
+| 4. 验收与发布 | complete | 111 项全量测试、TUI 渲染测试、clippy、fmt、release、安装和文档同步通过 |
+
+### 约束
+
+- 不改变 daemon RPC、session 隔离、审批安全和会话持久化语义。
+- 不复制 OpenClaude 品牌素材或依赖，仅提取交互和信息架构。
+- 每两次源码检索后记录 findings；每个阶段结束更新本计划和 progress。
+
+### 错误记录
+
+| 错误 | 尝试 | 解决 |
+|---|---|---|
+| 新增帮助浮层测试直接匹配中文字符串失败 | TestBackend 会把双宽字符按终端 cell 展开为空格 | 测试比较前移除空格，保留真实渲染内容断言 |

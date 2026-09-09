@@ -126,7 +126,9 @@ struct TuiState {
     should_quit: bool,
     scroll: usize,
     follow_bottom: bool,
+    unread_messages: usize,
     show_tools: bool,
+    show_help: bool,
     workspace: String,
     theme_mode: TuiThemeMode,
     resume_choices: Vec<SessionInfo>,
@@ -165,7 +167,9 @@ impl TuiState {
             should_quit: false,
             scroll: 0,
             follow_bottom: true,
+            unread_messages: 0,
             show_tools: false,
+            show_help: false,
             workspace: std::env::current_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
@@ -190,6 +194,8 @@ impl TuiState {
         self.approval_scroll = 0;
         self.scroll = 0;
         self.follow_bottom = true;
+        self.unread_messages = 0;
+        self.show_help = false;
         self.resume_choices.clear();
         self.render_cache.clear();
     }
@@ -197,6 +203,8 @@ impl TuiState {
     fn push_user(&mut self, content: String) {
         self.push_text(Role::User, content);
         self.scroll = 0;
+        self.follow_bottom = true;
+        self.unread_messages = 0;
     }
 
     fn record_history(&mut self, input: &str) {
@@ -259,6 +267,9 @@ impl TuiState {
     }
 
     fn push_text_for_turn(&mut self, role: Role, content: String, turn_id: Option<RequestId>) {
+        if !self.follow_bottom {
+            self.unread_messages = self.unread_messages.saturating_add(1);
+        }
         self.messages.push(UiMessage {
             id: self.next_message_id,
             role,
@@ -272,6 +283,9 @@ impl TuiState {
     }
 
     fn start_tool(&mut self, turn_id: RequestId, call_id: Option<String>, name: String) {
+        if !self.follow_bottom {
+            self.unread_messages = self.unread_messages.saturating_add(1);
+        }
         self.messages.push(UiMessage {
             id: self.next_message_id,
             role: Role::Tool,
@@ -339,6 +353,9 @@ impl TuiState {
         } else {
             self.scroll = self.scroll.saturating_sub(lines.unsigned_abs());
             self.follow_bottom = self.scroll == 0;
+            if self.follow_bottom {
+                self.unread_messages = 0;
+            }
         }
     }
 
@@ -350,6 +367,7 @@ impl TuiState {
     fn scroll_to_bottom(&mut self) {
         self.scroll = 0;
         self.follow_bottom = true;
+        self.unread_messages = 0;
     }
 }
 
@@ -443,9 +461,10 @@ async fn run_event_loop(
                         state.status = format!("操作失败：{error:#}");
                     }
                 }
-                Event::Paste(text) if state.pending_approvals.is_empty() => {
+                Event::Paste(text) if state.pending_approvals.is_empty() && !state.show_help => {
                     state.input.insert_text(&text)
                 }
+                Event::Mouse(_) if state.show_help => {}
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp if !state.pending_approvals.is_empty() => {
                         state.approval_scroll = state.approval_scroll.saturating_sub(3);
@@ -497,7 +516,20 @@ async fn run_event_loop(
 
 async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) -> Result<()> {
     if key.code == KeyCode::Esc {
-        state.request_quit();
+        if state.show_help {
+            state.show_help = false;
+        } else {
+            state.request_quit();
+        }
+        return Ok(());
+    }
+    if key.code == KeyCode::F(1)
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('/'))
+    {
+        state.show_help = !state.show_help;
+        return Ok(());
+    }
+    if state.show_help {
         return Ok(());
     }
     match key.code {
@@ -876,6 +908,23 @@ mod tests {
         state.request_quit();
         assert!(state.should_quit);
         assert_eq!(state.status, "再见");
+    }
+
+    #[test]
+    fn tracks_unread_messages_when_scrolled_away_from_bottom() {
+        let mut state = TuiState::from_snapshot(recovery::RecoverySnapshot {
+            session_id: "test".to_owned(),
+            messages: Vec::new(),
+            pending_approvals: Vec::new(),
+            active_requests: Vec::new(),
+        });
+        state.scroll_by(8);
+        state.push_text(Role::Assistant, "新消息".to_owned());
+        assert_eq!(state.unread_messages, 1);
+        assert!(!state.follow_bottom);
+        state.scroll_to_bottom();
+        assert_eq!(state.unread_messages, 0);
+        assert!(state.follow_bottom);
     }
 
     #[tokio::test]

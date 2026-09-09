@@ -136,3 +136,6 @@
 - 已实现：turn lock 获取支持 cancellation select；PlanStore 的 set/update/add 使用串行 mutation lock；session.list/CLI/TUI 增加 idle/running/waiting 与 active_requests 实时状态，审批等待单独显示 waiting。
 - 新增回归：排队请求取消、计划并发更新、独立 session 活动状态；定向测试通过，全量 `cargo test` 109/109 通过，严格 Clippy 已通过。
 - 最终验收完成：`cargo fmt --all -- --check`、`git diff --check`、`cargo test --all-targets`（109/109）、严格 Clippy、`cargo build --release` 全部通过；`cargo install --path . --force` 已完成，`myagent --version`/`myagent status` 验证为 0.1.0/stopped，命令链接到当前 release 二进制。
+- 2026-09-09 开始 OpenClaude TUI 对比：确认其分层 transcript、sticky-bottom/新消息 pill、动态 prompt 高度、footer/status line、快捷键帮助和紧凑工具反馈模式。
+- 已完成 TUI 改造：消息区改为紧凑层级化 transcript；底部拆分状态线/快捷键线；滚离底部累计 unread 并显示回底部提示；F1/Ctrl+/ 帮助浮层；prompt 高度随终端高度动态上限；粘贴和鼠标滚动在帮助浮层打开时不会穿透。
+- TUI 渲染回归增至 14 项，完整 `cargo test --all-targets` 增至 111/111；严格 Clippy、fmt、release 构建、`cargo install --path . --force` 和 `myagent --version` 验证通过；README、仓库 HTML 与桌面 HTML 已同步快捷键说明。

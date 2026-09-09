@@ -249,3 +249,19 @@
 - 计划写入串行化：`PlanStore` 的 `set/update/add` 共用 mutation mutex，保证“读当前状态→校验→原子持久化→替换内存状态”是单写者临界区，避免两个工具调用并发时后写入覆盖先写入的步骤更新；新增并发更新测试。
 - session 实时状态：`SessionInfo` 增加 `status`（idle/running/waiting）、`active_requests` 和兼容性 `updated_at` 字段。daemon 从活动请求表和审批 broker 实时派生状态，session.list、CLI `/sessions`、TUI 恢复选择均展示活动状态；旧 JSONL/旧 session 清单因 serde default 保持可读取。
 - 取舍：没有直接复制 OpenClaude 的后台子进程控制面或完整 goal evaluator，因为当前项目已有 cron/MCP/daemon 生命周期，先优先修复会直接影响多窗口交互可靠性的三个临界区；后台任务控制面可作为后续独立阶段。
+
+## OpenClaude TUI 对比研究（2026-09-09）
+
+- OpenClaude 的主 REPL 把消息区、底部 prompt、prompt footer/status line、通知/快捷键提示分层；prompt 底部槽位有最大高度约束，避免多行输入把 transcript 挤没。当前 TUI 也有五段布局，但状态提示和快捷键全部挤在一行 footer，输入区缺少明确的模式/队列/审批层级。
+- OpenClaude 的消息呈现以“用户/助手/工具”三种视觉角色为核心：用户消息有清晰的输入标记，助手输出保留 Markdown/流式位置，工具调用以紧凑的 spinner/结果行呈现，详细输出可展开；当前 TUI 已有结构化 UiMessage/工具卡片，但每条消息前后额外空行较多，工具与正文的视觉层级仍不够紧凑。
+- OpenClaude 的滚动模型支持 sticky bottom、离底后显示新消息分隔/跳到底部入口，并对长 transcript 使用虚拟列表；当前 TUI 已有 follow_bottom、缓存和 PgUp/Dn，但离底时只有“距底部 N 行”文字，没有明显的“新消息/回到底部”交互提示。
+- OpenClaude 的 footer 会按终端宽度隐藏/折叠可选信息，把状态线、快捷键、模式提示和队列提示分别处理；当前 TUI 虽按宽度裁剪 footer，但窄终端会直接丢失状态和取消/审批提示。
+- 可迁移方案：保留现有 ratatui 和协议，增加 compact transcript markers、sticky-bottom 新消息 pill、结构化 status bar、prompt 内队列/审批提示、可切换 help overlay 和更强的窄终端降级。暂不引入 OpenClaude 的 React 虚拟 DOM、远程对话框或品牌 Logo。
+
+## OpenClaude TUI 对比落地（2026-09-09）
+
+- transcript 现在以更紧凑的“角色标题 → 内容 → `·` 结束标记”呈现，助手正文使用 `│` 延续线，代码块使用 `┌─/└─`，工具调用保留状态色和可展开输出；这对应 OpenClaude 的 MessageResponse/工具行层级，同时不改变消息数据。
+- footer 拆成状态线和快捷键线：状态线显示当前操作、活动请求、排队数量或待审批数；快捷键线按宽度降级，避免把所有信息塞进一个长字符串。
+- sticky-bottom 体验增加 unread counter：用户滚离底部时新消息会累计，transcript 下方显示“X 条新消息 · 回到底部”；回到底部会清零。现有 Ctrl+End、PgUp/Dn 和 follow_bottom 语义保持不变。
+- 新增 F1/Ctrl+/ 帮助浮层，集中说明发送、多行、历史、滚动、工具、队列、取消和退出操作；Esc 在帮助打开时只关闭帮助，不会误退出。
+- prompt 高度改为随终端高度动态调整，最多占用一半内容区且保留状态/footer；窄终端继续使用最小布局和短提示。

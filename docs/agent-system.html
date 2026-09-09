@@ -1013,7 +1013,7 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
+            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、紧凑工具卡片和 sticky-bottom 新消息提示。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；F1 或 Ctrl+/ 打开快捷键帮助。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
             <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。另支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
