@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 use daemon::lifecycle::{DaemonStatus, RuntimePaths};
 use daemon::runtime::build_daemon_state;
 use daemon::server::run_unix_server;
-use entry::cli::{print_sessions, recover_connection, request_result, run_chat, run_repl};
+use entry::cli::{print_sessions, request_result, run_chat, run_repl};
 use entry::editor::run_acp_server;
 use entry::serve::run_http_server;
 use entry::tui::run_tui;
@@ -122,7 +122,7 @@ async fn run_chat_command(workspace: &Path, prompt: Vec<String>) -> Result<()> {
     let paths = RuntimePaths::for_workspace(workspace)?;
     paths.ensure_daemon(workspace).await?;
     let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-    recover_connection(&client).await?;
+    entry::recovery::start_new_session(&client).await?;
     if prompt.is_empty() {
         run_repl(&client).await
     } else {

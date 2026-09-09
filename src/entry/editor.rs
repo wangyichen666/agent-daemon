@@ -99,16 +99,16 @@ fn build_acp_agent(client: DaemonClient, workspace: PathBuf) -> impl ConnectTo<A
                     if let Err(error) = require_workspace(&request.cwd, &workspace) {
                         return responder.respond_with_error(error);
                     }
-                    let snapshot = match recovery::load_snapshot(&client).await {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => return responder.respond_with_error(internal_error(error)),
-                    };
+                    let snapshot =
+                        match recovery::resume_session(&client, &request.session_id.to_string())
+                            .await
+                        {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                return responder.respond_with_error(internal_error(error));
+                            }
+                        };
                     let session_id = SessionId::new(snapshot.session_id.clone());
-                    if session_id != request.session_id {
-                        return responder.respond_with_error(AcpError::resource_not_found(Some(
-                            request.session_id.to_string(),
-                        )));
-                    }
                     if let Err(error) =
                         replay_history(&task_connection, &session_id, &snapshot.messages)
                     {

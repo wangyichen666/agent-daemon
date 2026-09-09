@@ -17,6 +17,7 @@ use crate::daemon::approval::PendingApprovalInfo;
 use crate::daemon::protocol::{EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
 use crate::provider::{Message, Role};
+use crate::session::SessionInfo;
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -63,6 +64,7 @@ struct TuiState {
     show_tools: bool,
     workspace: String,
     theme_mode: TuiThemeMode,
+    resume_choices: Vec<SessionInfo>,
 }
 
 impl TuiState {
@@ -95,7 +97,21 @@ impl TuiState {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             theme_mode: TuiThemeMode::from_env(),
+            resume_choices: Vec::new(),
         }
+    }
+
+    fn replace_snapshot(&mut self, snapshot: recovery::RecoverySnapshot) {
+        self.messages = snapshot
+            .messages
+            .into_iter()
+            .filter_map(message_to_ui)
+            .collect();
+        self.active_request_id = snapshot.active_requests.first().cloned();
+        self.pending_approval = snapshot.pending_approvals.first().cloned();
+        self.approval_scroll = 0;
+        self.scroll = 0;
+        self.resume_choices.clear();
     }
 
     fn push_user(&mut self, content: String) {
@@ -121,15 +137,11 @@ impl TuiState {
 }
 
 pub async fn run_tui(client: DaemonClient, workspace: &std::path::Path) -> Result<()> {
-    let snapshot = recovery::load_snapshot(&client).await?;
+    let snapshot = recovery::start_new_session(&client).await?;
+    let session_id = snapshot.session_id.clone();
     let mut state = TuiState::from_snapshot(snapshot);
     state.workspace = workspace.display().to_string();
-    if let Some(request_id) = state.active_request_id.clone() {
-        match recovery::subscribe(&client, &request_id).await {
-            Ok(stream) => state.active = Some(stream),
-            Err(error) => state.status = format!("恢复订阅失败：{error:#}"),
-        }
-    }
+    state.status = format!("新会话 {session_id} · /resume 恢复历史");
 
     let _guard = TerminalGuard;
     let mut terminal = setup_terminal()?;
@@ -298,17 +310,7 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => state.input.push('\n'),
         KeyCode::Enter if !state.input.trim().is_empty() && state.active.is_none() => {
             let message = std::mem::take(&mut state.input);
-            if matches!(message.trim(), "/exit" | "/quit") {
-                state.status = "退出".to_owned();
-                return Ok(());
-            }
-            state.push_user(message.clone());
-            let stream = client
-                .request("chat.send", json!({"message": message}))
-                .await?;
-            state.active_request_id = Some(stream.request_id().clone());
-            state.active = Some(stream);
-            state.status = "Agent 正在工作".to_owned();
+            submit_input(client, state, message).await?;
         }
         _ => {}
     }
@@ -365,6 +367,129 @@ async fn handle_frame(state: &mut TuiState, frame: ServerFrame) -> Result<()> {
     Ok(())
 }
 
+async fn submit_input(client: &DaemonClient, state: &mut TuiState, message: String) -> Result<()> {
+    let input = message.trim();
+    match input {
+        "/exit" | "/quit" => {
+            state.status = "退出".to_owned();
+            return Ok(());
+        }
+        "/help" => {
+            state.messages.push(UiMessage {
+                role: Role::System,
+                content: "/resume：列出历史会话\n/resume <编号或 ID>：恢复会话\n/new：新建空白会话\n/status：查看当前状态\n/exit：退出 TUI".to_owned(),
+            });
+            state.status = "已显示命令帮助".to_owned();
+            return Ok(());
+        }
+        "/resume" | "/sessions" => {
+            show_resume_choices(client, state).await?;
+            return Ok(());
+        }
+        "/new" => {
+            let snapshot = recovery::start_new_session(client).await?;
+            let id = snapshot.session_id.clone();
+            state.replace_snapshot(snapshot);
+            state.status = format!("已新建会话：{id}");
+            return Ok(());
+        }
+        "/status" => {
+            let snapshot = recovery::load_snapshot(client).await?;
+            state.status = format!(
+                "会话 {} · {} 条消息",
+                snapshot.session_id,
+                snapshot.messages.len()
+            );
+            return Ok(());
+        }
+        "/cancel" => {
+            state.status = "当前没有正在运行的请求".to_owned();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    if let Some(selection) = input.strip_prefix("/resume ") {
+        resume_selection(client, state, selection.trim()).await?;
+        return Ok(());
+    }
+    if input.starts_with('/') {
+        state.status = format!("未知命令：{input} · 输入 /help 查看命令");
+        return Ok(());
+    }
+    if !state.resume_choices.is_empty() && input.chars().all(|character| character.is_ascii_digit())
+    {
+        resume_selection(client, state, input).await?;
+        return Ok(());
+    }
+
+    state.resume_choices.clear();
+    state.push_user(message.clone());
+    let stream = client
+        .request("chat.send", json!({"message": message}))
+        .await?;
+    state.active_request_id = Some(stream.request_id().clone());
+    state.active = Some(stream);
+    state.status = "Agent 正在工作".to_owned();
+    Ok(())
+}
+
+async fn show_resume_choices(client: &DaemonClient, state: &mut TuiState) -> Result<()> {
+    state.resume_choices = recovery::list_sessions(client)
+        .await?
+        .into_iter()
+        .filter(|session| session.message_count > 0)
+        .collect();
+    if state.resume_choices.is_empty() {
+        state.status = "暂无可恢复的历史会话".to_owned();
+        return Ok(());
+    }
+    let mut lines = vec!["可恢复的历史会话：".to_owned()];
+    for (index, session) in state.resume_choices.iter().enumerate() {
+        let marker = if session.active { " · 当前" } else { "" };
+        let preview = session.preview.as_deref().unwrap_or("无摘要");
+        lines.push(format!(
+            "{}. {} · {} 条消息{marker}\n   {preview}",
+            index + 1,
+            session.id,
+            session.message_count
+        ));
+    }
+    lines.push("输入编号，或使用 /resume <编号或 session ID>。".to_owned());
+    state.messages.push(UiMessage {
+        role: Role::System,
+        content: lines.join("\n"),
+    });
+    state.scroll = 0;
+    state.status = "请选择要恢复的 session".to_owned();
+    Ok(())
+}
+
+async fn resume_selection(
+    client: &DaemonClient,
+    state: &mut TuiState,
+    selection: &str,
+) -> Result<()> {
+    let session_id = resolve_session_selection(&state.resume_choices, selection)?;
+    let snapshot = recovery::resume_session(client, &session_id).await?;
+    let message_count = snapshot.messages.len();
+    state.replace_snapshot(snapshot);
+    state.status = format!("已恢复 {session_id} · {message_count} 条消息");
+    Ok(())
+}
+
+fn resolve_session_selection(choices: &[SessionInfo], selection: &str) -> Result<String> {
+    match selection.parse::<usize>() {
+        Ok(index) if index > 0 => choices
+            .get(index - 1)
+            .map(|session| session.id.clone())
+            .with_context(|| format!("会话编号超出范围：{index}")),
+        Ok(_) => anyhow::bail!("会话编号从 1 开始"),
+        Err(_) if !selection.is_empty() => Ok(selection.to_owned()),
+        Err(_) => anyhow::bail!("session ID 不能为空"),
+    }
+}
+
 fn message_to_ui(message: Message) -> Option<UiMessage> {
     let content = message.content?.to_owned();
     Some(UiMessage {
@@ -375,7 +500,32 @@ fn message_to_ui(message: Message) -> Option<UiMessage> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
     use super::*;
+    use crate::context::{ContextConfig, ContextManager};
+    use crate::daemon::DaemonState;
+    use crate::daemon::approval::ApprovalBroker;
+    use crate::daemon::server::InMemoryServer;
+    use crate::loop_engine::LoopEngine;
+    use crate::plan::PlanStore;
+    use crate::provider::{Provider, Response, ToolSpec};
+    use crate::session::SessionStore;
+    use crate::tools::ToolRegistry;
+
+    static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
+
+    struct UnusedProvider;
+
+    #[async_trait]
+    impl Provider for UnusedProvider {
+        async fn chat(&self, _messages: &[Message], _tools: &[ToolSpec]) -> Result<Response> {
+            anyhow::bail!("恢复会话测试不应调用 Provider")
+        }
+    }
 
     #[test]
     fn converts_persisted_message_to_ui_message() {
@@ -383,5 +533,90 @@ mod tests {
         let converted = message_to_ui(message).expect("文本消息应可显示");
         assert_eq!(converted.role, Role::User);
         assert_eq!(converted.content, "检查项目");
+    }
+
+    #[test]
+    fn resolves_resume_number_or_stable_id() {
+        let choices = vec![SessionInfo {
+            id: "session-123.jsonl".to_owned(),
+            path: "session-123.jsonl".into(),
+            active: false,
+            message_count: 2,
+            modified_at: None,
+            preview: Some("旧问题".to_owned()),
+        }];
+        assert_eq!(
+            resolve_session_selection(&choices, "1").unwrap(),
+            "session-123.jsonl"
+        );
+        assert_eq!(
+            resolve_session_selection(&choices, "session-123.jsonl").unwrap(),
+            "session-123.jsonl"
+        );
+        assert!(resolve_session_selection(&choices, "2").is_err());
+    }
+
+    #[tokio::test]
+    async fn resume_command_lists_and_restores_selected_session() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let session_path = std::env::temp_dir().join(format!(
+            "my-agent-tui-resume-{}-{id}.jsonl",
+            std::process::id()
+        ));
+        let session = Arc::new(SessionStore::new(&session_path));
+        session
+            .append(&Message::text(Role::User, "需要恢复的旧问题"))
+            .await
+            .unwrap();
+        session
+            .append(&Message::text(Role::Assistant, "旧回答"))
+            .await
+            .unwrap();
+        let history = session.load().await.unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(UnusedProvider);
+        let context = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 1_000_000,
+                recent_messages: 100,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100_000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        let engine = Arc::new(LoopEngine::new(
+            provider,
+            ToolRegistry::new(),
+            context,
+            session.clone(),
+        ));
+        let client = InMemoryServer::start(Arc::new(DaemonState::new(
+            engine,
+            history,
+            session,
+            ApprovalBroker::new(),
+        )));
+
+        let fresh = recovery::start_new_session(&client).await.unwrap();
+        let mut state = TuiState::from_snapshot(fresh);
+        assert!(state.messages.is_empty());
+        submit_input(&client, &mut state, "/resume".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(state.resume_choices.len(), 1);
+        assert!(state.messages[0].content.contains("需要恢复的旧问题"));
+
+        submit_input(&client, &mut state, "1".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.messages[0].content, "需要恢复的旧问题");
+        assert_eq!(state.messages[1].content, "旧回答");
+
+        let _ = std::fs::remove_file(SessionStore::pointer_path(&session_path));
+        let _ = std::fs::remove_file(session_path);
     }
 }

@@ -336,6 +336,28 @@ mod tests {
         let sessions = result.unwrap();
         assert_eq!(sessions["sessions"][0]["active"], true);
         assert_eq!(sessions["sessions"][0]["message_count"], 2);
+        assert_eq!(sessions["sessions"][0]["preview"], "你好");
+        let original_session_id = sessions["sessions"][0]["id"].as_str().unwrap().to_owned();
+
+        let mut new_session = client.request("session.new", json!({})).await.unwrap();
+        let ServerFrame::Response(new_session) = new_session.next().await.unwrap() else {
+            panic!("预期 session.new 响应");
+        };
+        let new_session = new_session.result.unwrap();
+        assert_ne!(new_session["session_id"], original_session_id);
+        assert!(new_session["messages"].as_array().unwrap().is_empty());
+
+        let mut resume = client
+            .request("session.resume", json!({"session_id": original_session_id}))
+            .await
+            .unwrap();
+        let ServerFrame::Response(resume) = resume.next().await.unwrap() else {
+            panic!("预期 session.resume 响应");
+        };
+        let resumed = resume.result.unwrap();
+        assert_eq!(resumed["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(resumed["session_id"], original_session_id);
+        let _ = std::fs::remove_file(SessionStore::pointer_path(&session_path));
         let _ = std::fs::remove_file(session_path);
     }
 

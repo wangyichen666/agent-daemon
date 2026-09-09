@@ -31,6 +31,11 @@ struct CancelParams {
     request_id: RequestId,
 }
 
+#[derive(Deserialize)]
+struct SessionResumeParams {
+    session_id: String,
+}
+
 impl DaemonState {
     pub async fn handle_request(
         self: Arc<Self>,
@@ -49,6 +54,13 @@ impl DaemonState {
             }
             "session.new" => {
                 let result = self.session_new().await;
+                send_result(&frames, request.id, result);
+            }
+            "session.resume" => {
+                let result = match parse_params::<SessionResumeParams>(&request.params) {
+                    Ok(params) => self.session_resume(&params.session_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "approval.respond" => {
@@ -204,6 +216,11 @@ impl DaemonState {
     }
 
     async fn session_load(&self) -> Result<Value, (i64, String)> {
+        let _switch = self.session_switch.lock().await;
+        self.session_snapshot().await
+    }
+
+    async fn session_snapshot(&self) -> Result<Value, (i64, String)> {
         // 活动 turn（尤其是等待人工审批时）会长期持有内存历史锁。恢复端必须仍能
         // 立即读取快照，因此以每条消息均已 flush 的 append-only 会话文件为来源。
         let history = self
@@ -220,7 +237,7 @@ impl DaemonState {
             .cloned()
             .collect::<Vec<RequestId>>();
         Ok(json!({
-            "session_id": self.session.current_id(),
+            "session_id": self.session.current_id().await,
             "messages": history,
             "pending_approvals": approvals,
             "active_requests": active_requests,
@@ -236,20 +253,49 @@ impl DaemonState {
     }
 
     async fn session_new(&self) -> Result<Value, (i64, String)> {
-        if self.has_active_turns().await {
+        let _switch = self.session_switch.lock().await;
+        let active = self.active.lock().await;
+        if !active.is_empty() {
             return Err((REQUEST_CONFLICT, "有请求正在执行，不能新建会话".to_owned()));
         }
         let mut history = self.history.lock().await;
-        let backup = self
+        let session_id = self
             .session
-            .rotate_existing()
+            .start_new()
             .await
             .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
         history.clear();
         Ok(json!({
             "created": true,
-            "session_id": self.session.current_id(),
-            "backup": backup,
+            "session_id": session_id,
+            "messages": [],
+            "pending_approvals": [],
+            "active_requests": [],
+        }))
+    }
+
+    async fn session_resume(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        let _switch = self.session_switch.lock().await;
+        if self.session.current_id().await == session_id {
+            return self.session_snapshot().await;
+        }
+        let active = self.active.lock().await;
+        if !active.is_empty() {
+            return Err((REQUEST_CONFLICT, "有请求正在执行，不能切换会话".to_owned()));
+        }
+        let mut current_history = self.history.lock().await;
+        let history = self
+            .session
+            .resume(session_id)
+            .await
+            .map_err(|error| (INVALID_PARAMS, format!("{error:#}")))?;
+        current_history.clone_from(&history);
+        Ok(json!({
+            "resumed": true,
+            "session_id": self.session.current_id().await,
+            "messages": history,
+            "pending_approvals": [],
+            "active_requests": [],
         }))
     }
 

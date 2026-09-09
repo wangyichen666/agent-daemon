@@ -6,6 +6,7 @@ use crate::client::{DaemonClient, RpcStream};
 use crate::daemon::approval::PendingApprovalInfo;
 use crate::daemon::protocol::RequestId;
 use crate::provider::Message;
+use crate::session::SessionInfo;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RecoverySnapshot {
@@ -17,7 +18,31 @@ pub struct RecoverySnapshot {
 
 pub async fn load_snapshot(client: &DaemonClient) -> Result<RecoverySnapshot> {
     let value = crate::entry::cli::request_result(client, "session.load", json!({})).await?;
-    serde_json::from_value(value).context("daemon session.load 恢复快照格式无效")
+    parse_snapshot(value, "session.load")
+}
+
+pub async fn start_new_session(client: &DaemonClient) -> Result<RecoverySnapshot> {
+    let value = crate::entry::cli::request_result(client, "session.new", json!({})).await?;
+    parse_snapshot(value, "session.new")
+}
+
+pub async fn resume_session(client: &DaemonClient, session_id: &str) -> Result<RecoverySnapshot> {
+    let value = crate::entry::cli::request_result(
+        client,
+        "session.resume",
+        json!({"session_id": session_id}),
+    )
+    .await?;
+    parse_snapshot(value, "session.resume")
+}
+
+pub async fn list_sessions(client: &DaemonClient) -> Result<Vec<SessionInfo>> {
+    let value = crate::entry::cli::request_result(client, "session.list", json!({})).await?;
+    serde_json::from_value(value["sessions"].clone()).context("daemon session.list 格式无效")
+}
+
+fn parse_snapshot(value: serde_json::Value, method: &str) -> Result<RecoverySnapshot> {
+    serde_json::from_value(value).with_context(|| format!("daemon {method} 会话快照格式无效"))
 }
 
 pub async fn respond_to_approval(

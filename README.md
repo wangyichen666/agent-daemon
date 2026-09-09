@@ -11,13 +11,14 @@
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
 - `.my-agent/skills/*.md` 技能库只常驻标题/摘要索引，按关键词和中文 bigram 最多加载 3 个命中正文。
 - 三条记忆链路：append-only 会话、60%/85% 两级上下文摘要、TTL 长期记忆。
+- 每次启动 TUI 或 REPL 都创建空白 session；历史会话保留稳定 ID，可用 `/resume` 查看摘要并按编号或 ID 恢复。
 - JSON Schema 参数校验、统一路径边界、灾难命令硬拒、跨工作区写入和高风险命令审批。
 - 同轮连续只读工具最多 8 路并行，副作用工具串行；连续三次完全相同的工具调用与结果只做软提醒。
 - 显式按 request id 取消；不使用挂钟超时强杀正在执行的 turn。
 - daemon 使用工作区稳定哈希隔离 socket/PID/ready/log；启动探测、并发启动锁、失效标记清理和最后客户端断开后的空闲退出均已实现。
 - 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；同一服务的 `/ws` 提供全双工 JSON-RPC、事件流和交互审批；非回环监听必须配置 Bearer Token。
 - 编辑器入口实现标准 ACP v1（`agent-client-protocol`），支持 initialize、session/new/load、prompt、cancel、工具更新和 typed 权限请求。
-- 连接断开后可恢复：daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；CLI、ACP `session/load`、WebSocket 重连均可继续消费，不会因断线自动批准或拒绝。
+- 连接断开后可恢复：daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；ACP `session/load` 与 WebSocket 重连可继续消费，不会因断线自动批准或拒绝。
 
 cron 和 MCP 仍是未实现的可选扩展。本项目也不提供多租户、RBAC、容器沙箱、向量数据库或企业连接器。
 
@@ -59,16 +60,16 @@ src/daemon/
   lifecycle.rs             工作区运行目录、PID/ready、探测与自动拉起
   server.rs                内存回环与 Unix socket server
 src/entry/
-  cli.rs                   REPL、恢复活动请求、流式显示、slash 命令、Ctrl-C 取消
-  tui.rs                   ratatui 全屏界面、输入框、事件流、审批和取消
+  cli.rs                   REPL、新建/恢复 session、流式显示、slash 命令、Ctrl-C 取消
+  tui.rs                   ratatui 全屏界面、session 选择、输入框、事件流、审批和取消
   serve.rs                 health、OpenAI 兼容 HTTP/SSE 与全双工 WebSocket
   editor.rs                标准 ACP v1 stdio server、恢复与权限请求
-src/entry/recovery.rs      三入口共享的 session.load、approval、active subscribe helper
+src/entry/recovery.rs      入口共享的 session new/list/load/resume 与 active subscribe helper
 src/provider.rs            Provider trait、OpenAI 兼容请求与 SSE
 src/loop_engine.rs         ReAct、事件、取消、工具波次与结果回填
 src/context.rs             上下文排序、环境、Skill、估算与压缩
 src/safety.rs              文件与命令的唯一安全决策点
-src/session.rs             JSONL 会话、备份列表与 RAII turn 锁
+src/session.rs             稳定 ID 的独立 JSONL 会话、当前指针、摘要列表与 RAII turn 锁
 src/memory.rs              TTL 长期记忆与关键词/bigram 召回
 src/plan.rs                当前计划及原子 JSON 持久化
 src/sub_agent.rs           独立历史、受限工具的子 Agent
@@ -100,7 +101,7 @@ export MODEL_NAME='你的模型名'
 | `CONTEXT_RECENT_MESSAGES` | `12` | 强压缩时保留的最近消息数 |
 | `CONTEXT_MILD_PERCENT` | `60` | 温和压缩触发水位 |
 | `CONTEXT_STRONG_PERCENT` | `85` | 强力压缩触发水位 |
-| `SESSION_PATH` | `.my-agent/session.jsonl` | 会话 JSONL 路径 |
+| `SESSION_PATH` | `.my-agent/session.jsonl` | 兼容旧会话的基础路径；新 session 在同目录使用稳定独立 JSONL |
 | `MEMORY_PATH` | `.my-agent/memory.jsonl` | 长期记忆路径 |
 | `PLAN_PATH` | `.my-agent/plan.json` | 计划路径；`off` 表示仅内存 |
 | `SKILLS_DIR` | `.my-agent/skills` | Markdown Skill 目录 |
@@ -137,7 +138,7 @@ curl http://127.0.0.1:8787/health
 ./target/release/my-agent editor
 ```
 
-REPL 支持 `/help`、`/status`、`/sessions`、`/new`、`/cancel`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
+TUI 和 REPL 每次启动都会进入一个全新空白 session，不会自动显示旧对话。输入 `/resume` 可查看带编号、消息数和首条问题摘要的历史列表；输入编号或 `/resume <session-id>` 即可恢复。另支持 `/help`、`/status`、`/sessions`、`/new`、`/cancel`、`/exit`。运行中的 turn 按 Ctrl-C 会发送 `agent.cancel`，不会直接杀掉 daemon。
 
 TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；PageUp/PageDown 查看历史，Ctrl+T 展开/收起工具详情，Ctrl+U 清空草稿，Ctrl+C 取消当前请求。Esc 随时退出界面，空闲时也可输入 `/exit`；退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
 

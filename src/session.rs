@@ -1,19 +1,23 @@
 use std::env;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tracing::warn;
 
-use crate::provider::Message;
+use crate::provider::{Message, Role};
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum SessionError {
-    #[error("session.jsonl 第 {line} 行损坏: {source}")]
+    #[error("会话文件第 {line} 行损坏: {source}")]
     CorruptLine {
         line: usize,
         #[source]
@@ -21,19 +25,25 @@ pub enum SessionError {
     },
     #[error("系统时间早于 UNIX_EPOCH")]
     InvalidSystemTime,
+    #[error("找不到会话: {0}")]
+    UnknownSession(String),
+    #[error("非法会话 ID: {0}")]
+    InvalidSessionId(String),
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: String,
     pub path: PathBuf,
     pub active: bool,
     pub message_count: usize,
     pub modified_at: Option<u64>,
+    pub preview: Option<String>,
 }
 
 pub struct SessionStore {
-    path: PathBuf,
+    base_path: PathBuf,
+    current_path: RwLock<PathBuf>,
     turn_lock: Mutex<()>,
 }
 
@@ -49,14 +59,20 @@ impl SessionStore {
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let base_path = path.into();
+        let current_path =
+            Self::read_current_pointer(&base_path).unwrap_or_else(|| base_path.clone());
         Self {
-            path: path.into(),
+            base_path,
+            current_path: RwLock::new(current_path),
             turn_lock: Mutex::new(()),
         }
     }
 
-    pub fn current_id(&self) -> String {
-        self.path
+    pub async fn current_id(&self) -> String {
+        self.current_path
+            .read()
+            .await
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("session.jsonl")
@@ -68,12 +84,17 @@ impl SessionStore {
     }
 
     pub async fn load(&self) -> Result<Vec<Message>> {
-        if !self.path.exists() {
+        let path = self.current_path.read().await.clone();
+        Self::load_path(&path).await
+    }
+
+    async fn load_path(path: &Path) -> Result<Vec<Message>> {
+        if !path.exists() {
             return Ok(Vec::new());
         }
-        let bytes = tokio::fs::read(&self.path)
+        let bytes = tokio::fs::read(path)
             .await
-            .with_context(|| format!("读取会话失败: {}", self.path.display()))?;
+            .with_context(|| format!("读取会话失败: {}", path.display()))?;
         let content = String::from_utf8_lossy(&bytes);
         let lines = content.lines().collect::<Vec<&str>>();
         let has_complete_last_line = bytes.last().is_none_or(|byte: &u8| *byte == b'\n');
@@ -87,7 +108,7 @@ impl SessionStore {
                 Err(_) if index + 1 == lines.len() && !has_complete_last_line => {
                     warn!(
                         line = index + 1,
-                        path = %self.path.display(),
+                        path = %path.display(),
                         "忽略崩溃留下的不完整会话末行"
                     );
                     break;
@@ -106,7 +127,8 @@ impl SessionStore {
     }
 
     pub async fn append(&self, message: &Message) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
+        let path = self.current_path.read().await.clone();
+        if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("创建会话目录失败: {}", parent.display()))?;
@@ -116,43 +138,50 @@ impl SessionStore {
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)
+            .open(&path)
             .await
-            .with_context(|| format!("打开会话文件失败: {}", self.path.display()))?;
+            .with_context(|| format!("打开会话文件失败: {}", path.display()))?;
         file.write_all(&line)
             .await
-            .with_context(|| format!("追加会话消息失败: {}", self.path.display()))?;
+            .with_context(|| format!("追加会话消息失败: {}", path.display()))?;
         file.flush()
             .await
-            .with_context(|| format!("刷新会话文件失败: {}", self.path.display()))?;
+            .with_context(|| format!("刷新会话文件失败: {}", path.display()))?;
         Ok(())
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        let Some(directory) = self.path.parent() else {
+        let Some(directory) = self.base_path.parent() else {
             return Ok(Vec::new());
         };
         if !directory.exists() {
             return Ok(Vec::new());
         }
-        let active_name = self
-            .path
+        let current_path = self.current_path.read().await.clone();
+        let active_name = current_path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("session.jsonl")
             .to_owned();
-        let backup_prefix = format!("{active_name}.bak-");
         let mut entries = tokio::fs::read_dir(directory)
             .await
             .with_context(|| format!("读取会话目录失败: {}", directory.display()))?;
         let mut sessions = Vec::new();
         while let Some(entry) = entries.next_entry().await.context("遍历会话目录失败")? {
+            if !entry
+                .file_type()
+                .await
+                .context("读取会话文件类型失败")?
+                .is_file()
+            {
+                continue;
+            }
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
             let active = name == active_name;
-            if !active && !name.starts_with(&backup_prefix) {
+            if !active && !Self::is_session_name(&self.base_path, name) {
                 continue;
             }
             let bytes = tokio::fs::read(&path)
@@ -162,6 +191,7 @@ impl SessionStore {
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .count();
+            let preview = Self::preview(&bytes);
             let metadata = entry.metadata().await.context("读取会话文件属性失败")?;
             let modified_at = metadata
                 .modified()
@@ -174,6 +204,17 @@ impl SessionStore {
                 active,
                 message_count,
                 modified_at,
+                preview,
+            });
+        }
+        if !sessions.iter().any(|session| session.active) {
+            sessions.push(SessionInfo {
+                id: active_name,
+                path: current_path,
+                active: true,
+                message_count: 0,
+                modified_at: None,
+                preview: None,
             });
         }
         sessions.sort_by(|left, right| {
@@ -186,26 +227,141 @@ impl SessionStore {
         Ok(sessions)
     }
 
-    pub async fn rotate_existing(&self) -> Result<Option<PathBuf>> {
-        if !self.path.exists() {
-            return Ok(None);
+    pub async fn start_new(&self) -> Result<String> {
+        let _guard = self.turn_lock.lock().await;
+        let id = self.new_session_id()?;
+        let path = self
+            .base_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&id);
+        self.persist_current_pointer(&id).await?;
+        *self.current_path.write().await = path;
+        Ok(id)
+    }
+
+    pub async fn resume(&self, session_id: &str) -> Result<Vec<Message>> {
+        if Path::new(session_id).file_name() != Some(OsStr::new(session_id))
+            || !Self::is_session_name(&self.base_path, session_id)
+        {
+            return Err(SessionError::InvalidSessionId(session_id.to_owned()).into());
         }
+        let target = self
+            .base_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(session_id);
+        if !tokio::fs::symlink_metadata(&target)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            return Err(SessionError::UnknownSession(session_id.to_owned()).into());
+        }
+        let _guard = self.turn_lock.lock().await;
+        let history = Self::load_path(&target).await?;
+        self.persist_current_pointer(session_id).await?;
+        *self.current_path.write().await = target;
+        Ok(history)
+    }
+
+    fn new_session_id(&self) -> Result<String> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| SessionError::InvalidSystemTime)?
-            .as_secs();
-        let file_name = self
-            .path
+            .as_millis();
+        let sequence = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+        let stem = self
+            .base_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("session");
+        let extension = self
+            .base_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jsonl");
+        Ok(format!(
+            "{stem}-{timestamp}-{}-{sequence}.{extension}",
+            std::process::id()
+        ))
+    }
+
+    fn is_session_name(base_path: &Path, name: &str) -> bool {
+        let base_name = base_path
             .file_name()
-            .and_then(|name| name.to_str())
+            .and_then(|value| value.to_str())
             .unwrap_or("session.jsonl");
-        let backup = self
-            .path
-            .with_file_name(format!("{file_name}.bak-{timestamp}"));
-        tokio::fs::rename(&self.path, &backup)
+        let stem = base_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("session");
+        let extension = base_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jsonl");
+        name == base_name
+            || name.starts_with(&format!("{base_name}.bak-"))
+            || (name.starts_with(&format!("{stem}-")) && name.ends_with(&format!(".{extension}")))
+    }
+
+    pub(crate) fn pointer_path(base_path: &Path) -> PathBuf {
+        let name = base_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("session.jsonl");
+        base_path.with_file_name(format!("{name}.current"))
+    }
+
+    fn read_current_pointer(base_path: &Path) -> Option<PathBuf> {
+        let id = std::fs::read_to_string(Self::pointer_path(base_path)).ok()?;
+        let id = id.trim();
+        if Path::new(id).file_name() != Some(OsStr::new(id))
+            || !Self::is_session_name(base_path, id)
+        {
+            return None;
+        }
+        let candidate = base_path.parent()?.join(id);
+        candidate
+            .symlink_metadata()
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_file())
+            .then_some(candidate)
+    }
+
+    async fn persist_current_pointer(&self, session_id: &str) -> Result<()> {
+        let pointer = Self::pointer_path(&self.base_path);
+        if let Some(parent) = pointer.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("创建会话目录失败: {}", parent.display()))?;
+        }
+        let pointer_name = pointer
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("session.jsonl.current");
+        let temporary =
+            pointer.with_file_name(format!("{pointer_name}.tmp-{}", std::process::id()));
+        tokio::fs::write(&temporary, session_id)
             .await
-            .with_context(|| format!("轮换旧会话失败: {}", self.path.display()))?;
-        Ok(Some(backup))
+            .with_context(|| format!("写入当前会话指针失败: {}", temporary.display()))?;
+        tokio::fs::rename(&temporary, &pointer)
+            .await
+            .with_context(|| format!("提交当前会话指针失败: {}", pointer.display()))
+    }
+
+    fn preview(bytes: &[u8]) -> Option<String> {
+        String::from_utf8_lossy(bytes).lines().find_map(|line| {
+            let message = serde_json::from_str::<Message>(line).ok()?;
+            if message.role != Role::User {
+                return None;
+            }
+            let content = message
+                .content?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!content.is_empty()).then(|| content.chars().take(60).collect())
+        })
     }
 }
 
@@ -275,6 +431,50 @@ mod tests {
 
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].content.as_deref(), Some("已保存"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn creates_stable_sessions_and_resumes_by_id() {
+        let (store, base_path) = temp_session();
+        store
+            .append(&Message::text(Role::User, "旧会话问题"))
+            .await
+            .unwrap();
+        let old_id = base_path.file_name().unwrap().to_string_lossy().to_string();
+
+        let new_id = store.start_new().await.unwrap();
+        store
+            .append(&Message::text(Role::User, "新会话问题"))
+            .await
+            .unwrap();
+        let sessions = store.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, new_id);
+        assert!(sessions[0].active);
+        assert_eq!(sessions[0].preview.as_deref(), Some("新会话问题"));
+
+        let restored = store.resume(&old_id).await.unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].content.as_deref(), Some("旧会话问题"));
+        assert_eq!(store.current_id().await, old_id);
+
+        let reopened = SessionStore::new(&base_path);
+        assert_eq!(reopened.current_id().await, old_id);
+        assert_eq!(reopened.load().await.unwrap().len(), 1);
+
+        let new_path = base_path.with_file_name(new_id);
+        let pointer_path = SessionStore::pointer_path(&base_path);
+        let _ = std::fs::remove_file(base_path);
+        let _ = std::fs::remove_file(new_path);
+        let _ = std::fs::remove_file(pointer_path);
+    }
+
+    #[tokio::test]
+    async fn refuses_session_path_traversal() {
+        let (store, path) = temp_session();
+        let error = store.resume("../session.jsonl").await.unwrap_err();
+        assert!(error.to_string().contains("非法会话 ID"));
         let _ = std::fs::remove_file(path);
     }
 }

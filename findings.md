@@ -115,3 +115,9 @@
 - 依赖选择：`ratatui 0.30.2`（MIT，MSRV 1.88，默认 crossterm backend）+ `crossterm 0.29.0`（MIT）；当前工具链为 Rust 1.98.1，满足要求。TUI 需要处理 raw mode、alternate screen、输入框、事件流、审批 y/N、Ctrl-C 和退出清理。
 - TUI 优化核对：原界面默认颜色继承终端荧光绿；原滚动按原始行计数且使用 usize::MAX 哨兵，导致中文换行和 PageUp 不正确。改为显式 RGB 主题、统一按显示列宽换行、距底部行数滚动。视图独立于 RPC 层，工具结果默认折叠，Markdown 仅处理标题/强调/代码，不改会话内容。
 - 终端主题兼容结论：不能把“支持 RGB 类型”当作“当前会话会正确呈现真彩色”。在 `TERM=dumb`、`NO_COLOR=1` 或终端调色板重映射环境中，固定 RGB 可能被抑制或错误降级。可靠默认值应为 `Color::Reset` 前景/背景并用 Bold/Dim 建立层级；内置 RGB 深色主题只应显式选择。
+- session 现状：`SessionStore` 仅持有固定 `.my-agent/session.jsonl`，`session.new` 会把它重命名为 `.bak-时间戳`，而 `session.load` 永远只读固定活动文件。备份 session 没有切换/恢复 API，恢复后也无法保持稳定 ID。
+- TUI 旧对话根因：`run_tui` 启动第一步直接调用 `recovery::load_snapshot(session.load)` 并把全部消息转成 UI 消息；CLI `chat` 入口还会运行 `recover_connection` 主动打印历史。因此“重开程序”等同于自动恢复当前 daemon session。
+- 会话切换并发约束：`chat.send` 会先注册 active request，再锁 history 并在 LoopEngine 内取 turn lock。新建/恢复需要持有 active map 锁确认空闲，再持有 history 锁并切换 SessionStore 当前路径，才能阻止新 turn 在切换窗口内插入并写入错误 session。
+- 设计选择：每个 session 使用稳定独立 JSONL 文件，SessionStore 保存一个 current 指针；`session.resume {session_id}` 只接受列表内安全文件名。TUI/REPL 启动显式调用 `session.new`，`/resume` 再由用户选择历史，不再自动加载旧对话。
+- SQLite 评估：对于大量 session 的时间/标题/关键词检索、跨表事务和未来全文搜索，SQLite 优于遍历 JSONL；但当前单用户 daemon 下不是 `/resume` 的必要依赖。适合后续作为结构化索引与元数据层，原始大内容仍文件化，并通过迁移工具导入现有 JSONL。
+- session 并发审计补充：仅用 active/history 锁仍会让 `session.load` 与 new/resume 在极窄窗口返回“旧历史 + 新 ID”的混合快照；DaemonState 增加专用 `session_switch` 互斥后，load/new/resume 的路径与 ID 观察保持一致。

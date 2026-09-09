@@ -148,6 +148,8 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             Line::from(theme.muted_text("  读取 README，帮我了解这个项目")),
             Line::from(theme.muted_text("  先制定计划，再为项目补充测试")),
             Line::from(theme.muted_text("  调研配置读取位置，只返回结论")),
+            Line::default(),
+            Line::from(theme.muted_text("  /resume  恢复历史会话")),
         ]
     } else {
         state

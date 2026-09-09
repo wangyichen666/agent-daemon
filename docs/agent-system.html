@@ -608,7 +608,7 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>断线重连恢复</h3>
-          <p>daemon 保留活动 turn、待审批和最多 1 MiB 事件回放；CLI、ACP、WebSocket 重连后可继续消费。</p>
+          <p>每次打开 TUI/REPL 默认创建空白 session；历史会话保留稳定 ID，可用 <code>/resume</code> 按摘要选择。daemon 仍保留活动 turn 与事件回放供协议恢复。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -676,7 +676,7 @@
           <div class="step-no">03</div>
           <div class="step-body">
             <h3>Daemon 接管状态并持久化</h3>
-            <p><code>DaemonState</code> 获取无超时 RAII turn 锁，把用户消息追加到 <code>.my-agent/session.jsonl</code>，并登记可取消的活动请求。</p>
+            <p><code>DaemonState</code> 获取无超时 RAII turn 锁，把用户消息追加到当前稳定 ID 的 session JSONL，并登记可取消的活动请求。</p>
           </div>
         </article>
         <article class="step">
@@ -737,7 +737,7 @@
           <div class="step-no">11</div>
           <div class="step-body">
             <h3>保存最终回答</h3>
-            <p>模型返回纯文本后，assistant 消息先追加到 session.jsonl，再作为本 turn 的结果返回。</p>
+            <p>模型返回纯文本后，assistant 消息先追加到当前 session 的 JSONL，再作为本 turn 的结果返回。</p>
           </div>
         </article>
         <article class="step">
@@ -886,8 +886,8 @@
         <article class="panel memory-card" data-number="1">
           <span class="badge done">会话记忆</span>
           <h3>原始消息持久化</h3>
-          <p>每条 user / assistant / tool 消息追加写入 session.jsonl。daemon 启动时自动恢复；CLI 的 <code>/new</code> 会把旧文件轮换成时间戳备份。</p>
-          <div class="memory-meta">默认：.my-agent/session.jsonl</div>
+          <p>每个 session 使用稳定 ID 的独立 append-only JSONL；当前指针与 daemon 内存历史同步切换。TUI/REPL 启动默认新建，只有用户执行 <code>/resume</code> 才加载旧对话。</p>
+          <div class="memory-meta">基础路径：.my-agent/session.jsonl · 历史：同目录独立 JSONL</div>
         </article>
         <article class="panel memory-card" data-number="2">
           <span class="badge done">压缩记忆</span>
@@ -949,7 +949,7 @@
         <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、50 轮上限、并行波次、工具结果回填与最终终止判断。</p></article>
         <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>
         <article class="panel module-card"><h3><code>safety.rs</code></h3><p>所有文件路径和命令的单一安全决策点；审批由 daemon 中介挂起和恢复。</p></article>
-        <article class="panel module-card"><h3><code>session.rs</code></h3><p>append-only JSONL、残缺末行恢复、会话轮换，以及无超时的 RAII turn 锁。</p></article>
+        <article class="panel module-card"><h3><code>session.rs</code></h3><p>稳定 ID 的独立 append-only JSONL、当前 session 指针、摘要列表、残缺末行恢复与 RAII turn 锁。</p></article>
         <article class="panel module-card"><h3><code>memory.rs</code></h3><p>长期记忆条目、有效期、关键词和中文 bigram 索引逻辑，以及两个记忆工具。</p></article>
         <article class="panel module-card"><h3><code>plan.rs</code></h3><p>任务步骤状态、原子 JSON 持久化、动态上下文块与 plan 工具。</p></article>
         <article class="panel module-card"><h3><code>sub_agent.rs</code></h3><p>复用 ReAct 核心，提供独立历史、工具子集、轮次预算和禁止递归的子 Agent。</p></article>
@@ -992,6 +992,8 @@
 <span class="comment"># 4. 检查配置并运行全屏 TUI（默认入口）</span>
 <span class="prompt">$</span> ./target/release/my-agent config check
 <span class="prompt">$</span> ./target/release/my-agent
+<span class="prompt">&gt;</span> /resume
+<span class="prompt">&gt;</span> 1
 
 <span class="comment"># 可选：仅在终端支持 truecolor 时启用内置深色主题</span>
 <span class="prompt">$</span> MY_AGENT_TUI_THEME=dark myagent
@@ -1004,13 +1006,13 @@
         <aside class="panel">
           <ol class="usage-list">
             <li>在希望 Agent 操作的项目目录中启动；该目录就是安全工作区。</li>
-            <li>CLI 会探测并自动拉起当前工作区 daemon；历史由 daemon 自动恢复。</li>
+            <li>CLI 会探测并自动拉起当前工作区 daemon；每次打开 TUI/REPL 都创建全新空白 session，不自动显示旧对话。</li>
             <li>审批出现时核对完整命令或绝对路径，再输入 <code>y</code>；回车默认拒绝。</li>
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
             <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark myagent</code> 启用内置深色主题。Enter 发送、Alt+Enter 换行，支持多行粘贴；<code>PageUp/PageDown</code> 滚动，Ctrl+T 展开工具详情，Ctrl+U 清空草稿，Ctrl-C 取消当前 turn，Esc 退出。</li>
-            <li>普通 REPL 支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>；运行中按 Ctrl-C 发送显式取消。</li>
+            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。另支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
           </ol>

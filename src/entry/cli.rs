@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::HashSet;
 use std::io::Write;
 
@@ -9,10 +10,7 @@ use crate::daemon::protocol::{EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
 use crate::provider::Role;
 
-pub async fn recover_connection(client: &DaemonClient) -> Result<()> {
-    recover_connection_with(client, ask_approval).await
-}
-
+#[cfg(test)]
 async fn recover_connection_with<F>(client: &DaemonClient, mut decide: F) -> Result<()>
 where
     F: FnMut(&str) -> Result<bool>,
@@ -59,7 +57,7 @@ where
 }
 
 pub async fn run_repl(client: &DaemonClient) -> Result<()> {
-    println!("my-agent 已连接 daemon。输入 /help 查看命令。");
+    println!("my-agent 已连接 daemon，并创建了新会话。输入 /resume 恢复历史，/help 查看命令。");
     loop {
         print!("> ");
         std::io::stdout().flush().context("刷新终端输出失败")?;
@@ -79,7 +77,11 @@ pub async fn run_repl(client: &DaemonClient) -> Result<()> {
             "/status" => print_session_status(client).await?,
             "/sessions" => print_sessions(client).await?,
             "/new" => create_session(client).await?,
+            "/resume" => resume_session(client, None).await?,
             "/cancel" => println!("当前没有前台请求；运行中按 Ctrl-C 可取消本轮。"),
+            _ if input.starts_with("/resume ") => {
+                resume_session(client, Some(input.trim_start_matches("/resume ").trim())).await?
+            }
             _ if input.starts_with('/') => println!("未知命令：{input}。输入 /help 查看命令。"),
             _ => run_chat(client, input).await?,
         }
@@ -153,23 +155,19 @@ pub async fn run_chat(client: &DaemonClient, input: &str) -> Result<()> {
 }
 
 pub async fn print_sessions(client: &DaemonClient) -> Result<()> {
-    let result = request_result(client, "session.list", json!({})).await?;
-    let sessions = result["sessions"].as_array().context("会话列表格式无效")?;
+    let sessions = recovery::list_sessions(client).await?;
     if sessions.is_empty() {
         println!("暂无会话记录。");
         return Ok(());
     }
-    for session in sessions {
-        let marker = if session["active"].as_bool() == Some(true) {
-            "*"
-        } else {
-            " "
-        };
+    for (index, session) in sessions.iter().enumerate() {
+        let marker = if session.active { "*" } else { " " };
         println!(
-            "{marker} {} · {} 条消息 · {}",
-            session["id"].as_str().unwrap_or("unknown"),
-            session["message_count"].as_u64().unwrap_or(0),
-            session["path"].as_str().unwrap_or("unknown")
+            "{marker} {}. {} · {} 条消息 · {}",
+            index + 1,
+            session.id,
+            session.message_count,
+            session.preview.as_deref().unwrap_or("无摘要")
         );
     }
     Ok(())
@@ -187,11 +185,69 @@ async fn print_session_status(client: &DaemonClient) -> Result<()> {
 }
 
 async fn create_session(client: &DaemonClient) -> Result<()> {
-    let result = request_result(client, "session.new", json!({})).await?;
-    if let Some(path) = result["backup"].as_str() {
-        println!("已新建会话；旧会话备份到 {path}");
-    } else {
-        println!("已新建会话。");
+    let snapshot = recovery::start_new_session(client).await?;
+    println!("已新建会话：{}", snapshot.session_id);
+    Ok(())
+}
+
+async fn resume_session(client: &DaemonClient, selection: Option<&str>) -> Result<()> {
+    let sessions = recovery::list_sessions(client)
+        .await?
+        .into_iter()
+        .filter(|session| session.message_count > 0)
+        .collect::<Vec<_>>();
+    if sessions.is_empty() {
+        println!("暂无可恢复的历史会话。");
+        return Ok(());
+    }
+    let selected = match selection {
+        Some(value) if !value.is_empty() => value.to_owned(),
+        _ => {
+            for (index, session) in sessions.iter().enumerate() {
+                println!(
+                    "{}. {} · {} 条消息 · {}",
+                    index + 1,
+                    session.id,
+                    session.message_count,
+                    session.preview.as_deref().unwrap_or("无摘要")
+                );
+            }
+            print!("请选择会话编号或输入 session ID：");
+            std::io::stdout().flush().context("刷新会话选择提示失败")?;
+            let mut answer = String::new();
+            std::io::stdin()
+                .read_line(&mut answer)
+                .context("读取会话选择失败")?;
+            answer.trim().to_owned()
+        }
+    };
+    if selected.is_empty() {
+        println!("已取消恢复。");
+        return Ok(());
+    }
+    let session_id = match selected.parse::<usize>() {
+        Ok(index) if index > 0 => sessions
+            .get(index - 1)
+            .map(|session| session.id.clone())
+            .with_context(|| format!("会话编号超出范围：{index}"))?,
+        Ok(_) => anyhow::bail!("会话编号从 1 开始"),
+        Err(_) => selected,
+    };
+    let snapshot = recovery::resume_session(client, &session_id).await?;
+    println!(
+        "已恢复会话 {}，共 {} 条消息。",
+        snapshot.session_id,
+        snapshot.messages.len()
+    );
+    for message in snapshot.messages {
+        let Some(content) = message.content else {
+            continue;
+        };
+        match message.role {
+            Role::User => println!("[你] {content}"),
+            Role::Assistant => println!("[Agent] {content}"),
+            Role::System | Role::Tool => {}
+        }
     }
     Ok(())
 }
@@ -246,6 +302,7 @@ fn ask_approval(prompt: &str) -> Result<bool> {
     ))
 }
 
+#[cfg(test)]
 async fn consume_recovered_stream(
     client: &DaemonClient,
     request_id: &RequestId,
@@ -308,7 +365,7 @@ async fn consume_recovered_stream(
 
 fn print_help() {
     println!(
-        "/help      查看命令\n/status    查看当前会话状态\n/sessions  列出会话文件\n/new       备份当前会话并新建会话\n/cancel    无前台请求时显示提示；运行中按 Ctrl-C 取消\n/exit      断开并退出"
+        "/help             查看命令\n/status           查看当前会话状态\n/sessions         列出会话文件\n/resume           列表选择并恢复历史会话\n/resume <ID>      直接恢复指定会话\n/new              新建空白会话\n/cancel           无前台请求时显示提示；运行中按 Ctrl-C 取消\n/exit             断开并退出"
     );
 }
 

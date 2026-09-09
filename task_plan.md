@@ -158,3 +158,31 @@
 - 默认改为终端原生主题：继承前景色与背景色，不再整屏强制 RGB 背景。
 - 保留显式真彩深色主题，通过 `MY_AGENT_TUI_THEME=dark` 启用。
 - 增加渲染测试，确保默认主题不写入固定背景色；fmt、60 项测试、严格 clippy、release 构建与实际 PTY 退出恢复均通过。
+
+## 默认新会话与 `/resume`（2026-09-08）
+
+### 目标
+
+每次启动交互入口都创建全新 session，不自动展示旧对话；用户在 TUI/REPL 输入 `/resume` 后查看历史 session，并选择一个继续会话。断线后仍允许 daemon 保持活动任务，不把“启动新会话”和“恢复未完成请求”混为一谈。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| S1. 现状与语义核对 | complete | session 存储格式、daemon RPC、TUI/CLI 恢复路径与活动请求约束 |
+| S2. daemon 会话切换能力 | complete | 可列举元数据、按 ID 加载并切换当前 session、新建 session |
+| S3. TUI/CLI `/resume` | complete | 启动新 session、列表选择、取消与错误反馈 |
+| S4. 回归与文档 | complete | 单元/集成/PTY、README/HTML、release、clippy |
+
+### 本轮约束
+
+- daemon 仍是 session 唯一真相源，TUI/CLI 只通过 RPC 操作。
+- 不能在活动 turn 或待审批期间静默切换 session；必须给出明确错误，避免结果写进错误会话。
+- 历史列表至少展示稳定 session ID 与可识别摘要，恢复必须由用户明确选择。
+- 已记录错误：首次源码检查工具调用的 JavaScript 字符串拼接有语法错误，未执行任何命令；改为单一合法命令字符串后继续。
+- 已记录告警：移除启动时自动恢复调用后，旧 CLI `recover_connection` 三个函数成为 dead code；保留集成测试所需 helper 并用 `#[cfg(test)]` 收窄，删除无调用的生产包装函数。
+- 已记录格式检查失败：原子 current 指针临时文件表达式不符合 rustfmt 单行布局；其余 63 项测试、Clippy 和 release 仍通过。执行 rustfmt 后单独重验格式门禁。
+- 已记录测试编译失败：新增 TUI `/resume` 集成测试漏导入 `SessionStore`，生产代码未受影响；按编译器建议补齐测试模块导入后重验。
+
+### SQLite 取舍
+
+- 本轮不引入 SQLite：它对 `/resume` 正确性不是必要条件，同时迁移 session、memory、plan 会扩大风险面。
+- 后续会话规模增长后，可用 SQLite 保存 session/message/plan/memory 元数据与全文索引；图片和大工具输出仍保留文件，仅记录路径，并提供 JSONL 导入。

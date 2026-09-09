@@ -94,3 +94,8 @@
 - 优化验收：59 项全量测试通过，TUI 测试覆盖 110/44/24/16 列、长回答末尾和翻页；生成 TestBackend 预览并检查。真实 PTY 以隔离工作区和占位模型配置验证启动/输入/Esc/终端恢复，未调用真实 API。
 - TUI 主题兼容修复：确认当前运行环境可出现 `TERM=dumb`、`NO_COLOR=1`，原实现仍强制 RGB 前景与整屏背景，终端降级后会产生异常亮色。默认主题现全部使用终端 Reset 色和粗体/Dim 层级；`MY_AGENT_TUI_THEME=dark` 仅作为显式真彩选项。
 - 主题修复验收：新增“默认主题不绘制任何固定背景”测试，60/60 全量测试、严格 Clippy、release 与格式检查通过；隔离 PTY 中启动并用 Esc 退出，终端状态正常恢复。README、仓库 HTML 和桌面 HTML 已同步。
+- session 阶段 S2 完成：SessionStore 改为稳定独立 JSONL + current 指针，兼容旧 `session.jsonl` 和 `.bak-*`；列表新增首条用户问题摘要，新增 `session.resume` RPC，并在 active map/history/turn lock 的统一顺序下安全切换。
+- S2 验证通过：SessionStore 新建、指针重启恢复、按 ID 恢复、路径穿越拒绝，以及 daemon 的 new/list/resume/history 集成链路均通过。
+- S3 完成：TUI/REPL 启动显式 `session.new`；TUI `/resume` 显示编号、消息数、当前标记和首条问题摘要，支持直接输入编号或 `/resume <编号|ID>`；`/new`、`/status`、`/help` 同步接入。ACP `session/load` 也改为按请求 ID 切换，并保留活动当前 session 的重连订阅。
+- S4 验收：64/64 全量测试、严格 Clippy、release、fmt 和 diff check 全绿；隔离 PTY 连续两次启动生成不同 session ID。桌面/仓库 HTML 逐字节一致，旧 daemon 经确认 active=0、pending=0 后已优雅停止，下次 `myagent` 会自动启动新版本。
+- 最终并发审计增加 `session_switch` 锁，使 load/new/resume 快照互斥；跨 session 切换仍同时持有 active/history/turn 锁，活动当前 session 的只读恢复不受影响。补丁后再次完成 64/64、Clippy、release 与格式全套验证。
