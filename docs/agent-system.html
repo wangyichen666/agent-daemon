@@ -603,7 +603,7 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>全屏终端 TUI</h3>
-          <p>直接运行 <code>myagent</code> 进入全屏界面：默认继承终端前景与背景，兼容浅色、深色和自定义主题；也可显式启用真彩深色主题。界面居中限宽，支持 Markdown 排版、工具折叠、中文滚动、流式输出和独立 Y/N 审批面板。</p>
+          <p>直接运行 <code>myagent</code> 进入全屏界面：默认继承终端前景与背景，也内置 dark/light 语义主题。界面支持结构化工具卡片、CJK 安全编辑、消息换行缓存、滚动跟随、发送队列、多轮次与独立审批队列。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -1013,7 +1013,7 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark myagent</code> 启用内置深色主题。Enter 发送、Alt+Enter 换行，支持多行粘贴；<code>PageUp/PageDown</code> 滚动，Ctrl+T 展开工具详情，Ctrl+U 清空草稿，Ctrl-C 取消当前 turn，Esc 退出。</li>
+            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 退出。</li>
             <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。另支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>

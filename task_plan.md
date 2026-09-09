@@ -204,6 +204,25 @@
 | 6. MCP stdio 客户端 | complete | 握手、工具桥接、隔离、审批、进程清理测试通过 |
 | 7. 全量回归与完成报告 | complete | fmt/check/clippy/tests/release 全绿，配置和限制文档化 |
 
+## TUI 交互与渲染能力补齐（2026-09-09）
+
+### 目标
+
+在不改变 daemon 作为唯一真相源、保持单 crate 的前提下，完成 TUI 的退出解耦、结构化消息、输入编辑、滚动、渲染缓存、排队发送、并发请求/审批表达和三主题语义色板。
+
+| 阶段 | 状态 | 主要交付 |
+|---|---|---|
+| 0. 现状确认 | complete | 退出、状态、UiMessage、输入、滚动、快照、颜色与渲染热点定位 |
+| 1. 类型化退出 | complete | `should_quit` 独占退出控制流，slash/Esc 不依赖文案 |
+| 2. 结构化 UiMessage | complete | Text/Tool 节点、稳定 id、状态/耗时、工具卡片 |
+| 3. InputEditor | complete | 光标、词操作、多行、历史、CJK 列定位 |
+| 4. 滚动与鼠标 | complete | line/page/top/bottom、follow-bottom、可选鼠标 |
+| 5. 换行缓存 | complete | 按消息版本/宽度缓存与 session/resize 失效 |
+| 6. 发送队列 | complete | FIFO 排队、自动出队、可见与清空 |
+| 7. 多活跃/审批集合 | complete | 快照全量重建、并发轮次与审批队列 |
+| 8. 语义主题 | complete | terminal/dark/light tokens、无硬编码组件色值 |
+| 9. 全量验收 | complete | render/逻辑/集成/PTY、fmt/clippy/release、文档 |
+
 ### 本轮原则
 
 - 严格按 0→7 推进，每阶段验证后再进入下一阶段。

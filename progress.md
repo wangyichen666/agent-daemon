@@ -122,3 +122,9 @@
 - 当前进入项目六：自研 MCP stdio 客户端。
 - 项目六完成：`.my-agent/mcp.json` 双层错误隔离、占位符边界、stdio 双 framing、initialize/tools/list/call、动态 schema 工具桥接、默认审批、安全命令/路径检查、reload 与进程清理均已落地；97/97 全量测试、release、严格 Clippy、fmt 全绿。
 - 阶段 7 完成：README/HTML/规划记录已同步，最终质量门禁全部通过，当前六项能力补齐任务完成。
+- 2026-09-09 启动 TUI 交互与渲染能力补齐。已按新附件完成现状审阅和规划：确认退出控制耦合中文文案、工具输出拼接再拆分、输入/滚动能力有限、全量重排无缓存、快照只取 `.first()`、主题仅 terminal/dark。当前进入阶段 1：类型化退出。
+- TUI 阶段 1 完成：`should_quit` 取代“退出”魔法文案，Esc 与 `/exit` 共用类型化入口；6 项 TUI 定向测试及严格 Clippy 通过。当前进入阶段 2：结构化 UiMessage。
+- TUI 阶段 2 完成：结构化 Text/Tool UI 节点已替换旧字符串拼接，工具卡片呈现状态和耗时；修正 `tool_call_id` 事件字段，定向测试与严格 Clippy 通过。当前进入阶段 3：InputEditor。
+- TUI 阶段 3–8 完成：InputEditor、滚动/follow-bottom/可选鼠标、版本化换行缓存、FIFO 队列、活动 turn/审批集合和 terminal/dark/light 语义主题均已落地；恢复快照不再用 `.first()` 丢弃并发项。
+- TUI 阶段 9 完成：README 与 HTML 已同步；全量 103/103 测试、格式、严格 Clippy 与 release 构建通过。
+- 最终补充验收：新增主题 render 覆盖后全量 104/104 测试、格式、严格 Clippy 与 release 构建仍全绿；在隔离临时工作区以 Ollama 占位配置真实启动 release TUI，确认初始界面绘制、Esc 退出及 alternate-screen/raw-mode 恢复均正常。未发起模型请求；临时工作区已移入废纸篓，可恢复。

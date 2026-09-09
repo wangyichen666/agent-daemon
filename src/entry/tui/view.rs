@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use super::{TuiState, TuiThemeMode, UiMessage};
+use super::{RenderCacheKey, ToolStatus, TuiState, TuiThemeMode, UiMessage, UiMessageKind};
 use crate::provider::Role;
 
 #[derive(Clone, Copy)]
@@ -17,9 +17,13 @@ struct Theme {
     foreground: Color,
     muted: Color,
     border: Color,
-    accent: Color,
+    info: Color,
+    success: Color,
+    error: Color,
     warm: Color,
     code: Color,
+    diff_add: Color,
+    diff_remove: Color,
     muted_modifier: Modifier,
 }
 
@@ -32,9 +36,13 @@ impl Theme {
                 foreground: Color::Reset,
                 muted: Color::Reset,
                 border: Color::Reset,
-                accent: Color::Reset,
-                warm: Color::Reset,
+                info: Color::Blue,
+                success: Color::Green,
+                error: Color::Red,
+                warm: Color::Yellow,
                 code: Color::Reset,
+                diff_add: Color::Green,
+                diff_remove: Color::Red,
                 muted_modifier: Modifier::DIM,
             },
             TuiThemeMode::Dark => Self {
@@ -43,9 +51,28 @@ impl Theme {
                 foreground: Color::Rgb(220, 225, 234),
                 muted: Color::Rgb(143, 155, 174),
                 border: Color::Rgb(62, 73, 91),
-                accent: Color::Rgb(148, 181, 255),
+                info: Color::Rgb(148, 181, 255),
+                success: Color::Rgb(120, 205, 162),
+                error: Color::Rgb(244, 143, 143),
                 warm: Color::Rgb(230, 185, 119),
                 code: Color::Rgb(166, 206, 189),
+                diff_add: Color::Rgb(120, 205, 162),
+                diff_remove: Color::Rgb(244, 143, 143),
+                muted_modifier: Modifier::empty(),
+            },
+            TuiThemeMode::Light => Self {
+                background: Color::Rgb(246, 247, 250),
+                panel: Color::Rgb(255, 255, 255),
+                foreground: Color::Rgb(35, 40, 50),
+                muted: Color::Rgb(96, 106, 122),
+                border: Color::Rgb(177, 186, 202),
+                info: Color::Rgb(54, 91, 170),
+                success: Color::Rgb(35, 125, 79),
+                error: Color::Rgb(181, 55, 61),
+                warm: Color::Rgb(139, 91, 24),
+                code: Color::Rgb(40, 116, 91),
+                diff_add: Color::Rgb(35, 125, 79),
+                diff_remove: Color::Rgb(181, 55, 61),
                 muted_modifier: Modifier::empty(),
             },
         }
@@ -87,15 +114,13 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         area.height.saturating_sub(2),
     );
     let input_lines = wrap_lines(
-        vec![Line::from(
-            theme.text(format!("{} ", state.input), theme.foreground),
-        )],
+        vec![Line::from(theme.text(state.input.text(), theme.foreground))],
         width.saturating_sub(4),
     );
     let input_height = (input_lines.len() as u16).clamp(1, 4) + 2;
     let approval_lines = state
-        .pending_approval
-        .as_ref()
+        .pending_approvals
+        .front()
         .map(|approval| {
             wrap_lines(
                 vec![Line::from(theme.text(&approval.prompt, theme.warm))],
@@ -130,7 +155,7 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             Line::from(vec![
                 Span::styled(
                     "✦ my-agent",
-                    theme.style(theme.accent).add_modifier(Modifier::BOLD),
+                    theme.style(theme.info).add_modifier(Modifier::BOLD),
                 ),
                 theme.text("   /   ", theme.border),
                 theme.text(workspace, theme.foreground),
@@ -140,6 +165,7 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         regions[0],
     );
 
+    let message_width = width.saturating_sub(2);
     let lines = if state.messages.is_empty() {
         vec![
             Line::default(),
@@ -152,15 +178,23 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             Line::from(theme.muted_text("  /resume  恢复历史会话")),
         ]
     } else {
-        state
-            .messages
+        let messages = state.messages.clone();
+        messages
             .iter()
-            .flat_map(|message| message_lines(message, state.show_tools, theme))
+            .flat_map(|message| cached_message_lines(state, message, message_width, theme))
             .collect()
     };
-    let lines = wrap_lines(lines, width.saturating_sub(2));
+    let lines = if state.messages.is_empty() {
+        wrap_lines(lines, message_width)
+    } else {
+        lines
+    };
     let max_scroll = lines.len().saturating_sub(usize::from(regions[1].height));
-    state.scroll = state.scroll.min(max_scroll);
+    if state.follow_bottom {
+        state.scroll = 0;
+    } else {
+        state.scroll = state.scroll.min(max_scroll);
+    }
     let start = max_scroll.saturating_sub(state.scroll);
     let visible: Vec<_> = lines
         .into_iter()
@@ -193,7 +227,11 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
                 .style(theme.style(theme.foreground))
                 .block(
                     Block::default()
-                        .title(" 确认 · PgUp/Dn 翻页 ")
+                        .title(format!(
+                            " 确认 {}/{} · PgUp/Dn 翻页 ",
+                            1,
+                            state.pending_approvals.len()
+                        ))
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(theme.style(theme.warm)),
@@ -203,15 +241,19 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     }
 
     let input_area = regions[3];
-    let border_color = if state.pending_approval.is_some() {
+    let border_color = if !state.pending_approvals.is_empty() {
         theme.border
     } else {
-        theme.accent
+        theme.info
     };
-    let title = if state.active.is_some() {
-        " 正在工作 · 可以先起草下一条 "
+    let title = if !state.active_turns.is_empty() {
+        format!(
+            " 正在工作 {} 轮 · 队列 {} · 可以先起草下一条 ",
+            state.active_turns.len(),
+            state.queued_turns.len()
+        )
     } else {
-        " 发送消息 "
+        " 发送消息 ".to_owned()
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -249,13 +291,12 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             inner,
         );
     }
-    if state.pending_approval.is_none() && inner.height > 0 {
-        let column = input_lines
-            .last()
-            .map_or(0, |line| line.width().saturating_sub(1));
+    if state.pending_approvals.is_empty() && inner.height > 0 {
+        let (cursor_row, cursor_column) = state.input.visual_cursor(inner.width);
+        let cursor_row = cursor_row.saturating_sub(skip);
         frame.set_cursor_position((
-            inner.x + (column as u16).min(inner.width.saturating_sub(1)),
-            inner.y + (input_lines.len().saturating_sub(skip + 1) as u16).min(inner.height - 1),
+            inner.x + (cursor_column as u16).min(inner.width.saturating_sub(1)),
+            inner.y + (cursor_row as u16).min(inner.height - 1),
         ));
     }
     let status = if state.scroll > 0 {
@@ -264,7 +305,9 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         format!("● {}", state.status)
     };
     let footer = if width >= 90 {
-        format!("{status}    Enter 发送 · Alt↵ 换行 · PgUp/Dn 滚动 · Ctrl+T 工具 · Esc 退出")
+        format!(
+            "{status}    Enter 发送 · Alt↵ 换行 · PgUp/Dn 翻页 · Ctrl+↑↓ 滚动 · Ctrl+Home/End 首尾 · Esc 退出"
+        )
     } else if width >= 55 {
         format!("{status}   Enter 发送 · Ctrl+C 取消 · Esc 退出")
     } else {
@@ -276,29 +319,83 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     );
 }
 
+fn cached_message_lines(
+    state: &mut TuiState,
+    message: &UiMessage,
+    width: u16,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let key = RenderCacheKey {
+        message_id: message.id,
+        content_version: message.content_version,
+        width,
+        show_tools: state.show_tools,
+        theme_mode: state.theme_mode,
+    };
+    if let Some(lines) = state.render_cache.get(&key) {
+        return lines.clone();
+    }
+    let lines = wrap_lines(message_lines(message, state.show_tools, theme), width);
+    if state.render_cache.len() >= 512 {
+        state.render_cache.clear();
+    }
+    state.render_cache.insert(key, lines.clone());
+    lines
+}
+
 fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Line<'static>> {
-    if message.role == Role::Tool {
-        let heading = message.content.lines().next().unwrap_or("执行结果");
-        let mut lines = vec![Line::from(theme.muted_text(format!(
-            "  ✓ 工具  {}",
-            heading.chars().take(70).collect::<String>()
-        )))];
-        if show_tools {
+    let UiMessageKind::Text(content) = &message.kind else {
+        let UiMessageKind::Tool(tool) = &message.kind else {
+            return Vec::new();
+        };
+        let icon = match tool.status {
+            ToolStatus::Running => "○",
+            ToolStatus::Ok => "●",
+            ToolStatus::Failed => "✗",
+        };
+        let elapsed = tool
+            .finished_at
+            .map(|finished| {
+                format!(
+                    " · {:.1}s",
+                    finished.duration_since(tool.started_at).as_secs_f32()
+                )
+            })
+            .unwrap_or_default();
+        let expanded = tool
+            .expanded
+            .unwrap_or(show_tools || tool.status == ToolStatus::Failed);
+        let status_color = match tool.status {
+            ToolStatus::Running => theme.info,
+            ToolStatus::Ok => theme.success,
+            ToolStatus::Failed => theme.error,
+        };
+        let mut lines = vec![Line::from(theme.text(
+            format!("  {icon} 工具  {}{elapsed}", tool.heading),
+            status_color,
+        ))];
+        if expanded {
             lines.extend(
-                message
-                    .content
-                    .lines()
-                    .skip(1)
-                    .map(|line| Line::from(theme.muted_text(format!("    {line}")))),
+                tool.output
+                    .iter()
+                    .map(|line| Line::from(theme.muted_text(format!("    │ {line}")))),
             );
         }
         return lines;
-    }
+    };
     let (label, color) = match message.role {
         Role::User => ("›  你", theme.warm),
-        Role::Assistant => ("✦  Agent", theme.accent),
+        Role::Assistant => ("✦  Agent", theme.info),
         _ => ("·  提示", theme.muted),
     };
+    let age = message.created_at.elapsed().as_secs();
+    let usage = message
+        .token_usage
+        .as_ref()
+        .map_or_else(String::new, |usage| {
+            format!(" · {}↑/{}↓", usage.input, usage.output)
+        });
+    let label = format!("{label} · #{} · {age}s{usage}", message.id);
     let mut lines = vec![
         Line::default(),
         Line::from(Span::styled(
@@ -308,7 +405,7 @@ fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Lin
         Line::default(),
     ];
     let mut code = false;
-    for source in message.content.lines() {
+    for source in content.lines() {
         let trimmed = source.trim_start();
         if trimmed.starts_with("```") {
             code = !code;
@@ -322,7 +419,16 @@ fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Lin
         } else if code {
             lines.push(Line::from(vec![
                 theme.muted_text("  │ "),
-                theme.text(source, theme.code),
+                theme.text(
+                    source,
+                    if source.trim_start().starts_with('+') {
+                        theme.diff_add
+                    } else if source.trim_start().starts_with('-') {
+                        theme.diff_remove
+                    } else {
+                        theme.code
+                    },
+                ),
             ]));
         } else if message.role == Role::User {
             lines.push(Line::from(
@@ -376,7 +482,7 @@ fn inline(value: &str, base: Style, theme: Theme) -> Vec<Span<'static>> {
         let emphasis = if marker == "**" {
             base.add_modifier(Modifier::BOLD)
         } else {
-            base.fg(theme.accent)
+            base.fg(theme.info)
                 .bg(theme.panel)
                 .add_modifier(Modifier::BOLD)
         };
@@ -431,11 +537,20 @@ mod tests {
             active_requests: vec![],
         });
         state.workspace = "/Users/pilot/Documents/myproject/agent-rust".into();
-        state.messages = vec![
-            UiMessage { role: Role::User, content: "帮我了解这个项目，并给出下一步建议。".into() },
-            UiMessage { role: Role::Tool, content: "read_file · README.md\n原始工具输出默认收起".into() },
-            UiMessage { role: Role::Assistant, content: "## 一个专注个人开发的编码助手\n\n项目使用 **Rust**，由工作区 daemon 管理会话和工具执行。\n\n### 现在可以做什么\n- 读取与修改代码，运行测试\n- 用 `plan` 拆解任务，用子 Agent 调研\n- 在 CLI、ACP 和 WebSocket 之间恢复会话\n\n### 从这里开始\n```bash\nmyagent chat \"读取 README 并总结\"\n```\n\n建议先为配置模块补充测试，再逐步改进交互体验。".into() },
-        ];
+        state.push_text(Role::User, "帮我了解这个项目，并给出下一步建议。".into());
+        let turn_id = crate::daemon::protocol::RequestId::String("preview-turn".into());
+        state.start_tool(
+            turn_id.clone(),
+            Some("preview-read".into()),
+            "read_file".into(),
+        );
+        state.finish_tool(
+            &turn_id,
+            Some("preview-read"),
+            "read_file",
+            "原始工具输出默认收起",
+        );
+        state.push_text(Role::Assistant, "## 一个专注个人开发的编码助手\n\n项目使用 **Rust**，由工作区 daemon 管理会话和工具执行。\n\n### 现在可以做什么\n- 读取与修改代码，运行测试\n- 用 `plan` 拆解任务，用子 Agent 调研\n- 在 CLI、ACP 和 WebSocket 之间恢复会话\n\n### 从这里开始\n```bash\nmyagent chat \"读取 README 并总结\"\n```\n\n建议先为配置模块补充测试，再逐步改进交互体验。".into());
         state
     }
 
@@ -444,18 +559,41 @@ mod tests {
         let lines = wrap_lines(vec![Line::from("中文内容abcdef")], 6);
         assert!(lines.iter().all(|line| line.width() <= 6));
         let mut state = fixture();
-        state.messages[2].content = "长文本".repeat(200) + "\n最后一行";
+        let UiMessageKind::Text(content) = &mut state.messages[2].kind else {
+            panic!("第三条预览消息应为文本");
+        };
+        *content = "长文本".repeat(200) + "\n最后一行";
+        state.messages[2].content_version += 1;
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
         assert!(rendered.replace(' ', "").contains("最后一行"));
-        state.scroll = 8;
+        state.scroll_by(8);
         terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
         assert!(
             !buffer_text(terminal.backend().buffer())
                 .replace(' ', "")
                 .contains("最后一行")
         );
+    }
+
+    #[test]
+    fn caches_wrapped_messages_by_content_version_and_width() {
+        let mut state = fixture();
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        let cached = state.render_cache.len();
+        assert!(cached >= 3);
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        assert_eq!(state.render_cache.len(), cached);
+
+        let UiMessageKind::Text(content) = &mut state.messages[2].kind else {
+            panic!("预览消息应为文本");
+        };
+        content.push_str("\n新内容");
+        state.messages[2].content_version += 1;
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        assert!(state.render_cache.len() > cached);
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
@@ -497,11 +635,13 @@ mod tests {
                     .unwrap();
                 }
             }
-            state.pending_approval = Some(crate::daemon::approval::PendingApprovalInfo {
-                id: "a".into(),
-                request_id: crate::daemon::protocol::RequestId::Number(1),
-                prompt: "允许写入工作区外的文件 /tmp/demo.txt 吗？".into(),
-            });
+            state
+                .pending_approvals
+                .push_back(crate::daemon::approval::PendingApprovalInfo {
+                    id: "a".into(),
+                    request_id: crate::daemon::protocol::RequestId::Number(1),
+                    prompt: "允许写入工作区外的文件 /tmp/demo.txt 吗？".into(),
+                });
             terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
         }
     }
@@ -520,6 +660,30 @@ mod tests {
                 .iter()
                 .all(|cell| cell.bg == Color::Reset)
         );
+    }
+
+    #[test]
+    fn light_theme_has_distinct_semantic_status_colors() {
+        let theme = Theme::new(TuiThemeMode::Light);
+        assert_ne!(theme.background, Color::Reset);
+        assert_ne!(theme.info, theme.success);
+        assert_ne!(theme.success, theme.error);
+        assert_ne!(theme.diff_add, theme.diff_remove);
+    }
+
+    #[test]
+    fn dark_and_light_themes_paint_non_terminal_semantic_surfaces() {
+        for mode in [TuiThemeMode::Dark, TuiThemeMode::Light] {
+            let mut state = fixture();
+            state.theme_mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(110, 42)).unwrap();
+            terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+            let theme = Theme::new(mode);
+            let cells = &terminal.backend().buffer().content;
+            assert!(cells.iter().any(|cell| cell.bg == theme.background));
+            assert!(cells.iter().any(|cell| cell.fg == theme.info));
+            assert!(cells.iter().any(|cell| cell.fg == theme.success));
+        }
     }
 
     fn rgb(color: Color) -> String {

@@ -5,7 +5,7 @@
 ## 功能
 
 - 多 Provider：原生支持 OpenAI Chat Completions、Anthropic Messages 与 Ollama；协议差异封装在各自适配器内，统一输出文本与严格 tool-call 生命周期事件。
-- 全屏终端 TUI：默认继承终端前景/背景，兼容浅色、深色和自定义主题；可选真彩深色主题。界面居中限宽，支持 Markdown 标题/粗体/代码排版、工具详情收起、中文换行滚动、流式文本、独立审批面板和可见输入光标。
+- 全屏终端 TUI：默认继承终端前景/背景，也内置深色与浅色语义主题。支持结构化工具卡片、CJK 安全编辑、消息换行缓存、滚动跟随、发送队列、多轮次与审批队列。
 - 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
 - `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
@@ -130,7 +130,8 @@ export MODEL_NAME='你的模型名'
 | `HEARTBEAT_INTERVAL_SECS` | `300` | Heartbeat 间隔 |
 | `MY_AGENT_RUNTIME_DIR` | 系统临时目录 | daemon socket/PID/ready/log 根目录 |
 | `MY_AGENT_API_TOKEN` | 未设置 | HTTP Bearer Token；非回环监听必填 |
-| `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；默认继承终端颜色，`dark` 启用内置真彩深色主题 |
+| `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；`terminal` 继承终端颜色，`dark`/`light` 使用内置语义色板 |
+| `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 后开启 crossterm 鼠标滚轮捕获 |
 | `RUST_LOG` | `warn` | tracing 日志过滤 |
 
 ## 使用
@@ -190,9 +191,9 @@ MCP 配置示例（`command` 与 env key 不展开占位符；只在 `args`、en
 
 保存后执行 `/mcp reload`；`/mcp list` 查看工具，`/mcp status` 查看逐 server 错误。当前只支持本地 stdio，不支持 streamable-http/SSE MCP。
 
-TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；PageUp/PageDown 查看历史，Ctrl+T 展开/收起工具详情，Ctrl+U 清空草稿，Ctrl+C 取消当前请求。Esc 随时退出界面，空闲时也可输入 `/exit`；退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
+TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；左右键、Home/End、Ctrl+左右和 Ctrl+Backspace/Ctrl+W 可移动或删除，单行草稿用上下键浏览历史。PageUp/PageDown 翻页，Ctrl+上下逐行滚动，Ctrl+Home/End 跳转首尾；Ctrl+T 展开/收起工具详情，Ctrl+K 清空发送队列，Ctrl+U 清空草稿，Ctrl+C 取消最近活动请求。Esc 随时退出界面，空闲时也可输入 `/exit`；退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
 
-TUI 默认使用 `terminal` 主题，不写固定前景/背景色，可跟随终端的浅色、深色或自定义配色。确认终端支持 truecolor 后，可用 `MY_AGENT_TUI_THEME=dark myagent` 启用内置深色主题；若显示异常，取消该变量或设为 `terminal`。
+TUI 默认使用 `terminal` 主题，主前景/背景继承终端，仅用 ANSI 状态色和 DIM/BOLD 表达层级，因此可跟随终端的浅色、深色或自定义配色。确认终端支持 truecolor 后，可用 `MY_AGENT_TUI_THEME=dark myagent` 或 `MY_AGENT_TUI_THEME=light myagent` 启用内置主题；若显示异常，取消该变量或设为 `terminal`。鼠标滚轮默认不截获，设 `MY_AGENT_TUI_MOUSE=1` 后才启用。
 
 HTTP 请求示例：
 

@@ -191,3 +191,35 @@
 - `cargo test --all-targets`：97/97 通过。
 - `cargo clippy --all-targets --all-features -- -D warnings` 通过且无 warning。
 - 文档已同步 README 与 `docs/agent-system.html`；明确新增配置、slash、MCP stdio 限制和安全边界。
+
+## TUI 交互与渲染能力补齐：现状确认（2026-09-09）
+
+- 退出控制目前错误地复用状态文案：`run_event_loop` 第 216 行以 `state.status == "退出"` 结束；Esc（244）与 SlashResponse::Exit（407）写入相同字符串。其余“退出”仅是 UI 文案或终端清理错误上下文。
+- `UiMessage` 只有 `role/content`（23-26），流式文本由 `append_assistant`（119）与最后 assistant 合并；ToolFinished（335-347）把工具名和输出拼成一个带换行的字符串，`view::message_lines`（279-295）再按行拆回。没有工具 call id、状态、耗时、消息 id 或 usage 容器。
+- 输入是 `String`；`handle_key` 只支持 Esc、审批 Y/N/Enter、PageUp/Down、Ctrl+T、Ctrl+U、Ctrl+C、Backspace、字符末尾追加、Alt+Enter、且只有 `active.is_none()` 的 Enter 才会提交（304-315）。Paste 也只追加末尾（211-213）。
+- 滚动为“距底部行数”：PageUp/Down 固定 ±8（256-262），view 用 `start=max_scroll-scroll`（161-166）；审批独占另一滚动值，固定 ±4（248-254）。没有 Home/End、逐行、鼠标或 follow-bottom 字段。
+- `wrap_lines` 定义于 `view.rs:390`，每次 draw 都包裹输入、审批和所有消息（89、100、158-161），当前无缓存。输入光标始终按最后一行宽度计算，无法定位到编辑中的中间字符。
+- 快照重建在 `from_snapshot`（73-74）和 `replace_snapshot`（111-112）均只取 active/pending 的 `.first()`，因此会静默丢失并发请求和审批。
+- 主题仅有 terminal/dark；`view.rs:13-69` 的 Theme 直接携带具体色，组件引用字段尚未有 success/error/info/diff 等语义 token。硬编码 `Color` 仅集中在该映射和测试；组件还有若干直接 `Style::default` 背景组合。
+
+### 阶段 1：类型化退出（已完成）
+
+- `TuiState::should_quit` 是唯一循环终止条件；`request_quit` 统一供 Esc 与 SlashResponse::Exit 使用，status 仅显示“再见”。
+- 新增回归测试证明任意 status 文案不会改变退出信号；TUI 定向测试与严格 Clippy 通过。
+
+### 阶段 2：结构化 UiMessage（已完成）
+
+- `UiMessage` 现在带稳定自增 id、创建时间、可选 token usage、内容版本；内容以 `Text` 或 `Tool(UiToolCall)` 区分。
+- 工具节点保留 `tool_call_id`、名称、面向用户的中文标题、运行/成功/失败状态、输出行、展开状态与开始/结束时间；`工具执行错误:` 结果会明确标为失败，视图直接渲染卡片，不再拼接后拆分文本。
+- 修正 TUI 对 daemon 事件字段的读取为 `tool_call_id`（此前误读 `call_id`）；同名工具调用现在按调用 ID 归属。
+- 定向 TUI 测试与严格 Clippy 均通过。
+
+### 阶段 3–8：交互、缓存、并发与主题（已完成）
+
+- `InputEditor` 使用 `Vec<char>` 保存 Unicode 标量与光标，支持左右、行首尾、词级移动/删除、前向删除、多行粘贴、历史浏览；视觉坐标按 `unicode-width` 计算，CJK 不再以字节偏移定位。
+- 聊天滚动保留“距底部”语义并加入 follow-bottom；PageUp/Down 翻页，Ctrl+上下逐行，Ctrl+Home/End 首尾。`MY_AGENT_TUI_MOUSE=1` 才启用鼠标滚轮捕获，默认不改变终端鼠标行为。
+- 消息渲染缓存键为 `message_id + content_version + width + tool 展开态 + theme`，以 512 项为上限；会话快照替换清空缓存，内容版本变化和宽度变化自然失效。
+- 普通输入在当前 turn/审批期间进入 FIFO `queued_turns`，Response 后自动启动下一条；Ctrl+K 清空尚未发送的队列。
+- 活动流改为 `Vec<ActiveTurn>`、审批改为 `VecDeque`；恢复快照完整保留每个 active request 并逐一订阅，流式文本和工具卡片按请求 ID 分离，避免并发串流。
+- 主题扩展为 terminal/dark/light；Theme 以 info/success/error/warm/code/diff-add/diff-remove 等语义 token 供组件使用，终端模式继续只用 Reset 色。
+- 新增输入 CJK、缓存失效、浅色语义色及并发 request/审批队列回归测试。
