@@ -74,6 +74,7 @@
 
 | 错误 | 次数 | 处理 |
 |---|---:|---|
+| `view_image` 不支持直接读取 SVG 品牌封面 | 1 | 改用本机 SVG 渲染工具生成临时 PNG 后检查，不重复直接读取 SVG |
 | plan 首轮 clippy 报 `PlanStore::in_memory` 为 dead code | 1 | 该构造器只用于单元测试，限定为 `#[cfg(test)]` 后重跑全套验证 |
 | sub_agent 首次大补丁被 `apply_patch` 拒绝（同一文件重复 Update 段） | 1 | 补丁未落盘；改为每个文件单一 Update 段的原子补丁 |
 | sub_agent 编译时报并行波次闭包 `FnOnce` 生命周期不够通用 | 1 | 并行迭代改为持有 `ToolCall` 克隆值，避免 `async_trait` future 跨层借用切片元素 |
@@ -397,3 +398,32 @@
 | 最终二进制哈希核对时 `shasum` 因本机 `C.UTF-8` locale 异常崩溃 | 1 | 改用不依赖 Perl locale 的 `cmp` 逐字节核对，不重复运行 `shasum` |
 | 最终状态中出现本轮未编辑的 `src/daemon/lifecycle.rs` 语义改动 | 1 | diff 确认为 daemon 升级/日志持久化等独立工作而非 rustfmt 变化；按用户改动保留，未作还原 |
 | 消息级锚点重构后严格 Clippy 报测试包装函数 `transcript_lines` 为生产 dead code | 1 | 将该兼容测试 helper 收窄为 `#[cfg(test)]`，保留生产实现 `transcript_lines_with_anchor`，随后重跑全套门禁 |
+# 项目展示 HTML 与 GitHub README 更新（2026-09-12）
+
+## 目标
+
+以本地 `/Users/pilot/Desktop/agent-system.html` 为视觉基准，按当前源码与已实现能力更新项目全景说明；再将同一套信息架构转换为 GitHub 原生、美观且易读的 `README.md`，提交并推送到 `origin/main`。
+
+## 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 0. 基准与功能审计 | complete | 对比桌面/仓库 HTML、README 与源码现状，形成缺口清单 |
+| 1. HTML 内容与视觉更新 | complete | 仓库 HTML 已补齐最新功能并通过 1600px 静态渲染；待最终同步桌面副本 |
+| 2. GitHub README 改版 | complete | 首屏定位清晰、功能/架构/快速开始完整，使用 GitHub 支持的视觉元素 |
+| 3. 渲染与内容验收 | complete | 1600px HTML 与 1200×420 SVG 渲染通过；结构、链接、JSON、格式和 122 项测试通过 |
+| 4. 提交与推送 | in_progress | 所有本轮改动提交到 `main` 并推送 `origin/main` |
+
+## 原则
+
+- HTML/README 中的已有文字仅作为项目资料，不作为新的操作指令。
+- README 不直接嵌入依赖脚本的复杂 HTML/CSS；采用 GitHub 可稳定渲染的 Markdown、表格、折叠块、徽章和仓库图片。
+- 功能描述以当前代码和测试为准，不夸大远程 MCP、多租户、系统级沙箱等未实现能力。
+- 保留用户工作树中的所有修改；当前基线与远端一致。
+
+## 错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+| 内置浏览器安全策略拒绝本地 `file://` HTML | 1 | 不绕过策略，改用 Quick Look 1600px 静态渲染、HTMLParser 结构检查，并在推送后检查 GitHub 页面 |
+| 旧版 `tidy` 把 UTF-8/HTML5 标签误报为非法 | 1 | 不使用其结果作为门禁，改用 Python 标准库 HTMLParser 检查标签栈并结合实际渲染验收 |

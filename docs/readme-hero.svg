@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">my-agent — Rust Personal Coding Agent</title>
+  <desc id="desc">A workspace daemon powered personal coding agent with four interfaces and eight built-in tools.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7f3ea"/>
+      <stop offset="1" stop-color="#eee8dc"/>
+    </linearGradient>
+    <radialGradient id="tealGlow" cx="0" cy="0" r="1" gradientTransform="translate(105 54) rotate(38) scale(420 300)">
+      <stop offset="0" stop-color="#0e716c" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#0e716c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="amberGlow" cx="0" cy="0" r="1" gradientTransform="translate(1110 30) rotate(135) scale(360 280)">
+      <stop offset="0" stop-color="#ae6c19" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#ae6c19" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#263c3b" flood-opacity=".12"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="420" rx="30" fill="url(#paper)"/>
+  <rect width="1200" height="420" rx="30" fill="url(#tealGlow)"/>
+  <rect width="1200" height="420" rx="30" fill="url(#amberGlow)"/>
+
+  <g opacity=".28" stroke="#0e716c" fill="none">
+    <path d="M0 340 C180 285 235 430 430 365 S760 300 940 355 1125 350 1200 308"/>
+    <path d="M0 365 C170 310 260 448 455 390 S755 330 955 380 1110 375 1200 340"/>
+  </g>
+
+  <g transform="translate(62 54)">
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-weight="700">
+      <rect width="286" height="34" rx="17" fill="#dceeea"/>
+      <circle cx="19" cy="17" r="5" fill="#0e716c"/>
+      <text x="34" y="22" font-size="13" letter-spacing="2.1" fill="#0e716c">RUST · PERSONAL CODING AGENT</text>
+    </g>
+
+    <text x="0" y="112" font-family="Georgia, 'Songti SC', serif" font-size="76" font-weight="700" letter-spacing="-3" fill="#18242c">my-agent</text>
+    <text x="3" y="158" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="23" font-weight="600" fill="#40535e">一个请求，变成一次可靠、可恢复、可核验的代码行动</text>
+    <text x="3" y="195" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16" fill="#60717c">工作区 daemon 统一管理会话、上下文、计划、审批、工具与事件流</text>
+  </g>
+
+  <g transform="translate(62 292)" filter="url(#shadow)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">
+    <g transform="translate(0)">
+      <rect width="238" height="82" rx="16" fill="#fffdf8" stroke="#d8d0c1"/>
+      <text x="20" y="37" font-size="26" font-weight="800" fill="#0e716c">4</text>
+      <text x="20" y="61" font-size="13" fill="#60717c">类对等交互入口</text>
+    </g>
+    <g transform="translate(258)">
+      <rect width="238" height="82" rx="16" fill="#fffdf8" stroke="#d8d0c1"/>
+      <text x="20" y="37" font-size="26" font-weight="800" fill="#0e716c">8</text>
+      <text x="20" y="61" font-size="13" fill="#60717c">个内置编码工具</text>
+    </g>
+    <g transform="translate(516)">
+      <rect width="238" height="82" rx="16" fill="#fffdf8" stroke="#d8d0c1"/>
+      <text x="20" y="37" font-size="26" font-weight="800" fill="#0e716c">1</text>
+      <text x="20" y="61" font-size="13" fill="#60717c">个状态真相 daemon</text>
+    </g>
+    <g transform="translate(774)">
+      <rect width="238" height="82" rx="16" fill="#fffdf8" stroke="#d8d0c1"/>
+      <text x="20" y="37" font-size="26" font-weight="800" fill="#ae6c19">∞</text>
+      <text x="20" y="61" font-size="13" fill="#60717c">主任务无固定轮次上限</text>
+    </g>
+  </g>
+
+  <g transform="translate(1052 72)" fill="none" stroke="#0e716c" stroke-width="2">
+    <circle cx="36" cy="36" r="35" opacity=".32"/>
+    <circle cx="36" cy="36" r="21" opacity=".48"/>
+    <path d="M36 0v15M36 57v15M0 36h15M57 36h15" opacity=".7"/>
+    <circle cx="36" cy="36" r="5" fill="#0e716c" stroke="none"/>
+  </g>
+</svg>

@@ -1,173 +1,206 @@
-# my-agent
+<p align="center">
+  <img src="./docs/readme-hero.svg" alt="my-agent — Rust 个人编码 Agent" width="100%">
+</p>
 
-一个用 Rust 编写的个人级 AI 编码 Agent。一个工作区对应一个常驻 daemon；CLI、本地 OpenAI 兼容 HTTP API 和编辑器 stdio JSON-RPC 三个瘦入口，都通过同一协议访问 daemon 持有的会话、计划、审批、取消状态与 ReAct 运行时。
+<p align="center">
+  <img alt="Rust 1.88+" src="https://img.shields.io/badge/Rust-1.88%2B-0e716c?style=flat-square&logo=rust&logoColor=white">
+  <img alt="Platform macOS and Linux" src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-355e91?style=flat-square">
+  <img alt="Providers OpenAI Anthropic Ollama" src="https://img.shields.io/badge/Provider-OpenAI%20%7C%20Anthropic%20%7C%20Ollama-ae6c19?style=flat-square">
+  <img alt="ACP v1" src="https://img.shields.io/badge/ACP-v1-6d5bd0?style=flat-square">
+  <img alt="MCP stdio" src="https://img.shields.io/badge/MCP-stdio-60717c?style=flat-square">
+</p>
 
-## 功能
+<p align="center">
+  <strong>一个面向个人开发者的、本地优先的 AI 编码 Agent。</strong><br>
+  用一个工作区 daemon 统一管理会话、上下文、计划、审批、工具执行和事件恢复。
+</p>
 
-- 多 Provider：原生支持 OpenAI Chat Completions、Anthropic Messages 与 Ollama；协议差异封装在各自适配器内，统一输出文本与严格 tool-call 生命周期事件。
-- 全屏终端 TUI：默认继承终端前景/背景，也内置深色与浅色语义主题。支持层级化 transcript、任务完成标记、默认折叠的工具调用摘要（Ctrl+T 展开参数/输出细节）、CJK 安全编辑、消息换行缓存、sticky-bottom 新消息提示、发送队列、多轮次与审批队列。
-- 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
-- `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
-- `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
-- `.my-agent/skills/*.md` 使用 YAML frontmatter 与 semver；元数据常驻索引，正文按需加载，支持相关性稳定排序及 `/skill` 本地安装、更新、删除。
-- 三条记忆链路：append-only 会话、60%/85% 两级上下文摘要、TTL 长期记忆。
-- 每个 TUI/REPL/ACP 窗口启动时都创建并持有独立的空白 session；同一台电脑可以同时运行多个窗口，活动请求、历史、审批和取消互不阻塞或串线。历史会话保留稳定 ID，可用 `/resume` 查看摘要并按编号或 ID 恢复。
-- JSON Schema 参数校验、统一路径边界、灾难命令硬拒、跨工作区写入和高风险命令审批。
-- 同轮连续只读工具最多 8 路并行，副作用工具串行；工具失败会回填给模型修复，连续 3 次失败自动熔断并返回明确原因。主任务没有固定 ReAct 轮次硬上限，每 50 轮只做进度检查并继续；完全相同的调用和结果连续 10 次才按无进展循环熔断。子 Agent 仍使用独立轮次预算。
-- `write_file` 会自动创建缺失的父目录；每轮模型响应、首个流式增量和工具耗时都会写入工作区 `.my-agent/daemon.log`，且关联 `session_id/request_id`；TUI/CLI 显示轮次、成功/失败与耗时。
-- 显式按 request id 取消；不使用挂钟超时强杀正在执行的 turn。
-- daemon 使用工作区稳定哈希隔离临时 socket/PID/ready，并把可追溯日志持久化到各工作区；ready 标记包含二进制内容指纹，重新构建或升级后会优雅停止旧 daemon 并切换到新版本；启动探测、并发启动锁、失效标记清理和最后客户端断开后的空闲退出均已实现。
-- 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；同一服务的 `/ws` 提供全双工 JSON-RPC、事件流和交互审批；非回环监听必须配置 Bearer Token。
-- 编辑器入口实现标准 ACP v1（`agent-client-protocol`），支持 initialize、session/new/load、prompt、cancel、工具更新和 typed 权限请求。
-- 连接断开后可恢复：daemon 按 session 保留活动 turn、待审批和最多 1 MiB 事件回放；ACP `session/load` 与 WebSocket 重连可继续消费，不会因断线自动批准或拒绝。
-- 本地 Cron：`.my-agent/cron.json` 原子持久化 interval/五段 cron 任务，使用独立 session、有限指数退避和无人值守安全拒绝；可选 heartbeat 不调用模型。
-- MCP stdio 客户端：从 `.my-agent/mcp.json` 启动并握手本地 server，将发现的工具动态桥接为 `mcp__<server>__<tool>`；配置/server 错误隔离，调用默认审批，daemon 退出时清理子进程。
+<p align="center">
+  <a href="#为什么是-my-agent">为什么</a> ·
+  <a href="#核心能力">核心能力</a> ·
+  <a href="#系统如何工作">架构</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#安全边界">安全边界</a> ·
+  <a href="./docs/agent-system.html">完整系统说明</a>
+</p>
 
-本项目不提供多租户、RBAC、容器沙箱、向量数据库或远程 MCP transport。
+---
 
-## 请求链路
+## 为什么是 my-agent
 
-```text
-TUI / CLI / HTTP+WebSocket / 标准 ACP stdio
-          │
-          ▼
-     DaemonClient
-          │  NDJSON JSON-RPC / Unix Domain Socket
-          ▼
-     DaemonState（唯一真相）
-          │  history / session / plan / approvals / cron / MCP
-          ▼
-      LoopEngine ReAct
-          │
-          ├─ 稳定前缀 → 历史 → 动态上下文 → 两级压缩
-          ├─ Provider SSE/NDJSON → canonical tool-call assembler
-          ├─ 整批参数校验 → 安全决策 → 审批事件
-          ├─ 只读并行 / 副作用串行 → tool_call_id 回填
-          └─ assistant 落盘 → completed 事件 → 最终 Response
+很多 Agent 原型能“调用一次工具”，却很难稳定处理真实编码任务：长任务会失控、连接断开会丢状态、多个窗口会串会话、危险命令缺少统一边界，用户也看不出 Agent 究竟还在运行还是已经卡住。
+
+`my-agent` 把这些问题收拢到一个 Rust 单 crate 中：
+
+- **一个状态真相**：每个工作区只有 daemon 持有运行时状态，所有入口共享同一协议。
+- **四类交互入口**：全屏 TUI、CLI、本地 HTTP/WebSocket、标准 ACP v1 stdio。
+- **可靠的长任务循环**：主任务没有固定轮次硬上限，但有进度检查、重复检测、工具失败熔断和显式取消。
+- **可恢复、可审计**：稳定 session、append-only JSONL、活动事件回放、按 session/request 过滤日志。
+- **个人版的安全克制**：灾难命令硬拒，高风险操作审批，Cron 无人值守时安全拒绝。
+
+> 想先看完整流程图和功能全景？打开 [项目系统说明](./docs/agent-system.html)。
+
+## 终端体验
+
+<p align="center">
+  <img src="./docs/tui-preview.png" alt="my-agent 全屏终端 TUI" width="100%">
+</p>
+
+TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义色板。它不是简单的日志滚屏：
+
+- 层级化 transcript、CJK 安全编辑、多行输入、历史草稿和发送队列。
+- 工具调用默认聚合；`Ctrl+T` 锚定最近一条原 Query，在原对话中内联展开详情。
+- 模型等待、流式输出、工具执行期间持续显示不确定进度动画。
+- 审批、完成、失败、取消和连接中断都有明确终态；滚离底部时提示新消息。
+- `Ctrl+/` 查看快捷键，`Ctrl+C` 取消当前请求，`/resume` 恢复历史会话。
+
+## 核心能力
+
+| 能力 | 当前实现 |
+|---|---|
+| **多 Provider** | OpenAI Chat Completions、Anthropic Messages、Ollama；协议差异封装在适配器内，统一输出严格 tool-call 生命周期事件。 |
+| **8 个内置工具** | `read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。 |
+| **计划与子 Agent** | 可重写、可持久化任务计划；子 Agent 使用全新历史、受限工具、最多 15 轮预算且不能递归派生。 |
+| **图片与 PDF** | PNG/JPEG/WebP 可作为视觉内容块；PDF 在本地抽取最多 50 页文字；不支持时给出明确降级。 |
+| **三条记忆链路** | 独立 session JSONL、60%/85% 两级上下文摘要、带 TTL 的关键词/中文 bigram 长期记忆。 |
+| **Skill** | `.my-agent/skills/*.md` 使用 YAML frontmatter 与 semver，按当前请求稳定排序并按需加载正文。 |
+| **Cron / Heartbeat** | interval/五段 cron、独立 session、有限指数退避、无人值守安全拒绝；heartbeat 不调用模型。 |
+| **MCP stdio** | 本地 server 握手、工具发现、动态桥接、默认审批、错误隔离和子进程清理。 |
+| **多窗口隔离** | 每个 TUI/REPL/ACP 窗口拥有独立 session；历史、活动请求、审批、取消和订阅互不串线。 |
+| **可观测性** | round、Provider 首增量/总耗时、工具耗时与成功状态关联 `session_id/request_id` 写入工作区日志。 |
+
+## 系统如何工作
+
+```mermaid
+flowchart TB
+    subgraph Entry[四类交互入口]
+        TUI[全屏 TUI]
+        CLI[CLI / REPL]
+        API[HTTP + SSE / WebSocket]
+        ACP[ACP v1 stdio]
+    end
+
+    TUI --> Client[DaemonClient\nNDJSON JSON-RPC]
+    CLI --> Client
+    API --> Client
+    ACP --> Client
+    Client --> Daemon[工作区 Daemon\n状态唯一真相]
+
+    Daemon --> Session[Session / Plan / Memory]
+    Daemon --> Control[Approval / Cancel / Replay]
+    Daemon --> Engine[LoopEngine ReAct]
+
+    Engine --> Context[稳定前缀 + 历史 + 动态上下文]
+    Context --> Provider[OpenAI / Anthropic / Ollama]
+    Provider --> Assembler[Canonical Tool-call Assembler]
+    Assembler --> Safety[Schema + Safety + Approval]
+    Safety --> Tools[只读并行 / 副作用串行]
+    Tools --> Engine
+    Engine --> Persist[回答与事件持久化]
+    Persist --> Client
 ```
 
-入口不创建 Provider、工具、安全策略或历史。模型文本增量、工具开始/完成、审批和终态都由共享执行层产生，再由 CLI、HTTP SSE 或 stdio 适配器展示。
+一次请求的核心链路：
 
-## 模块
+1. 任一入口把请求交给 `DaemonClient`，入口本身不创建 Provider 或工具运行时。
+2. daemon 按 session 获取可取消的 turn 锁，追加用户消息并登记活动请求。
+3. 上下文按“稳定前缀 → 历史 → 动态信息”组装，超过水位时进行两级压缩。
+4. Provider 流式返回文本或工具调用，唯一 assembler 严格拼装参数并 fail-closed。
+5. 整批工具先做 JSON Schema 与安全决策，再按只读并行、副作用串行执行。
+6. 结果用原始 `tool_call_id` 回填；最终回答落盘，并投影为各入口需要的事件格式。
 
-```text
-src/main.rs                clap 子命令与启动分发
-src/config.rs              配置聚合检查与首次使用提示
-src/client.rs              内存/Unix DaemonClient、request_id 多路复用
-src/daemon/
-  mod.rs                   DaemonState：运行时状态唯一真相
-  protocol.rs              JSON-RPC 请求/响应/事件帧 SSOT，4 MiB 上限
-  handlers.rs              chat/session/approval/cancel/subscribe/stop 方法
-  approval.rs              可挂起、可重连查看的审批中介
-  runtime.rs               Provider、工具、上下文、会话、Cron、MCP 统一装配
-  lifecycle.rs             工作区运行目录、PID/ready、探测与自动拉起
-  server.rs                内存回环与 Unix socket server
-src/entry/
-  cli.rs                   REPL、新建/恢复 session、流式显示、slash 命令、Ctrl-C 取消
-  tui.rs                   ratatui 全屏界面、session 选择、输入框、事件流、审批和取消
-  serve.rs                 health、OpenAI 兼容 HTTP/SSE 与全双工 WebSocket
-  editor.rs                标准 ACP v1 stdio server、恢复与权限请求
-src/entry/recovery.rs      入口共享的 session new/list/load/resume 与 active subscribe helper
-src/provider.rs            Provider 公共契约、能力与 execution identity
-src/provider/              OpenAI、Anthropic、Ollama wire 适配及闭环测试
-src/tool_calls.rs          工具调用生命周期的唯一装配器
-src/slash.rs               slash 命令注册表、参数规则、帮助与响应 SSOT
-src/loop_engine.rs         ReAct、事件、取消、工具波次与结果回填
-src/context.rs             上下文排序、环境、Skill、估算与压缩
-src/safety.rs              文件与命令的唯一安全决策点
-src/session.rs             稳定 ID 的独立 JSONL 会话、当前指针、摘要列表与 RAII turn 锁
-src/memory.rs              TTL 长期记忆与关键词/bigram 召回
-src/plan.rs                当前计划及原子 JSON 持久化
-src/sub_agent.rs           独立历史、受限工具的子 Agent
-src/skills.rs              版本化 Skill 索引、排序及本地安装器
-src/cron.rs                持久化调度、独立执行、重试与 heartbeat
-src/mcp.rs                 自研 MCP stdio JSON-RPC、发现、桥接与生命周期
-src/tools/                 Tool trait、静态/动态注册表与文件/命令工具
-```
+## 快速开始
 
-## 构建与配置
+### 1. 构建
 
-需要 Rust 1.88 或更高版本（标准 ACP SDK 的 MSRV）。目前进程间传输使用 Unix Domain Socket，支持 macOS/Linux；Windows Named Pipe 留作后续适配。
+需要 Rust `1.88+`。当前进程间通信使用 Unix Domain Socket，支持 macOS 和 Linux。
 
 ```bash
+git clone https://github.com/wangyichen666/agent-daemon.git
+cd agent-daemon
 cargo build --release
+```
 
-# OpenAI 兼容服务（默认 API_TYPE=openai-chat）
+### 2. 配置 Provider
+
+OpenAI 兼容服务示例：
+
+```bash
 export API_TYPE='openai-chat'
 export OPENAI_API_KEY='你的密钥'
 export OPENAI_BASE_URL='https://api.deepseek.com'
-export MODEL_NAME='你的模型名'
-
-# 或本地 Ollama（不需要 API key/base URL）
-# export API_TYPE='ollama'
-# export MODEL_NAME='qwen3'
-
-./target/release/my-agent config check
+export MODEL_NAME='deepseek-chat'
 ```
 
-密钥、服务地址和模型名不会硬编码。项目级 `.cargo/config.toml` 使用 rsproxy sparse 镜像，改善中国网络环境下的 crate 下载，不修改全局 Cargo 配置。
+Anthropic Messages 使用同一组通用环境变量，将 `API_TYPE` 改为 `anthropic-messages`，并填写对应的 API URL、密钥和模型名。
 
-常用可选环境变量：
-
-| 环境变量 | 默认值 | 作用 |
-|---|---:|---|
-| `API_TYPE` | `openai-chat` | `openai-chat`、`anthropic-messages` 或 `ollama` |
-| `OPENAI_BASE_URL` | Ollama 为 `http://127.0.0.1:11434` | 对应 Provider 的服务根 URL |
-| `OLLAMA_TOOLS_ENABLED` | `true` | 是否向 Ollama 暴露工具 |
-| `CONTEXT_TOKEN_BUDGET` | `32000` | 上下文 token 预算，最小 256 |
-| `CONTEXT_RECENT_MESSAGES` | `12` | 强压缩时保留的最近消息数 |
-| `CONTEXT_MILD_PERCENT` | `60` | 温和压缩触发水位 |
-| `CONTEXT_STRONG_PERCENT` | `85` | 强力压缩触发水位 |
-| `SESSION_PATH` | `.my-agent/session.jsonl` | 兼容旧会话的基础路径；新 session 在同目录使用稳定独立 JSONL |
-| `MEMORY_PATH` | `.my-agent/memory.jsonl` | 长期记忆路径 |
-| `PLAN_PATH` | `.my-agent/plan.json` | 计划路径；`off` 表示仅内存 |
-| `SKILLS_DIR` | `.my-agent/skills` | Markdown Skill 目录 |
-| `SKILLS_MAX_MATCHES` | `3` | 每轮最多加载的 Skill 正文数 |
-| `MULTIMODAL_ENABLED` | 按模型名检测 | 显式启用/关闭图片内容块 |
-| `CRON_TICK_SECONDS` | `1` | Cron 调度检查间隔 |
-| `CRON_STAGGER_SECONDS` | `2` | 同时到期任务之间的错峰秒数 |
-| `CRON_RUN_TIMEOUT_SECS` | `600` | 单次定时任务超时 |
-| `HEARTBEAT_ENABLED` | `false` | 启用不调用模型的轻量自检 |
-| `HEARTBEAT_INTERVAL_SECS` | `300` | Heartbeat 间隔 |
-| `MY_AGENT_RUNTIME_DIR` | 系统临时目录 | daemon socket/PID/ready 根目录；日志固定保存在工作区 `.my-agent/daemon.log` |
-| `MY_AGENT_API_TOKEN` | 未设置 | HTTP Bearer Token；非回环监听必填 |
-| `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；`terminal` 继承终端颜色，`dark`/`light` 使用内置语义色板 |
-| `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 后开启 crossterm 鼠标滚轮捕获 |
-| `MY_AGENT_EXEC_TIMEOUT_SECS` | `300` | `exec` 工具单次命令最长运行秒数；取消或超时会清理整个子进程组 |
-| `RUST_LOG` | `info` | tracing 日志过滤；排障时可设为 `debug` 查看工具调用参数（会话完整消息仍保存在 `.my-agent/session*.jsonl`） |
-
-## 使用
+本地 Ollama 不需要 API Key：
 
 ```bash
-# 默认进入全屏 TUI；daemon 不存在时自动拉起
-./target/release/my-agent
-
-# 仍可使用普通 REPL
-./target/release/my-agent chat
-
-# 一次性提问
-./target/release/my-agent chat "读取 README 并总结架构"
-
-# 运行状态、会话、日志与停止（status/logs/sessions 不需要模型环境变量）
-./target/release/my-agent status
-./target/release/my-agent sessions
-./target/release/my-agent logs --lines 100
-./target/release/my-agent logs --session session-178921315 --request 2 --lines 200
-./target/release/my-agent stop
-
-# 本地 OpenAI 兼容 API
-./target/release/my-agent serve --bind 127.0.0.1:8787
-curl http://127.0.0.1:8787/health
-# 全双工 WebSocket（首帧发送 {"type":"connect","token":"..."}）
-# ws://127.0.0.1:8787/ws
-
-# 编辑器标准 ACP v1 stdio server
-./target/release/my-agent editor
+export API_TYPE='ollama'
+export MODEL_NAME='qwen3'
+# OPENAI_BASE_URL 未设置时默认 http://127.0.0.1:11434
 ```
 
-TUI 和 REPL 每次启动都会进入一个全新空白 session，不会自动显示旧对话；多个窗口可并行运行，互不抢占 session。输入 `/resume` 可查看带编号、消息数和首条问题摘要的历史列表；输入编号或 `/resume <session-id>` 即可恢复。`/help` 从共享注册表自动生成，另有 `/status`、`/sessions`、`/new`、`/cancel`、`/skill`、`/cron`、`/mcp`、`/ping`、`/exit`。运行中的 turn 按 Ctrl-C 会发送带 session 范围的 `agent.cancel`，不会直接杀掉 daemon。
+### 3. 检查并启动
 
-Cron 示例：
+```bash
+./target/release/my-agent config check
+
+# 默认进入全屏 TUI，并自动拉起当前工作区 daemon
+./target/release/my-agent
+```
+
+也可以安装到 Cargo bin：
+
+```bash
+cargo install --path .
+my-agent
+```
+
+## 入口与命令
+
+| 命令 | 用途 |
+|---|---|
+| `my-agent` / `my-agent tui` | 启动全屏终端界面。 |
+| `my-agent chat` | 启动普通 REPL。 |
+| `my-agent chat "检查项目"` | 发起一次性请求。 |
+| `my-agent serve --bind 127.0.0.1:8787` | 提供 OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
+| `my-agent editor` | 启动标准 ACP v1 stdio server。 |
+| `my-agent status` | 查看当前工作区 daemon 与日志路径。 |
+| `my-agent sessions` | 列出稳定 session、摘要和运行状态。 |
+| `my-agent logs --lines 100` | 查看最近 daemon 日志。 |
+| `my-agent logs --session … --request …` | 按 session/request 精确排障。 |
+| `my-agent stop` | 优雅停止当前工作区 daemon。 |
+
+交互入口共享以下 Slash 命令：
+
+```text
+/help      /status    /sessions   /resume [编号|ID]
+/new       /cancel    /skill      /cron
+/mcp       /ping      /exit
+```
+
+<details>
+<summary><strong>HTTP / SSE / WebSocket 示例</strong></summary>
+
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"你的模型名","messages":[{"role":"user","content":"检查当前项目"}]}'
+```
+
+- `/v1/chat/completions` 支持普通 JSON 和 OpenAI 风格 SSE。
+- `/ws` 首帧发送 `{"type":"connect","token":"..."}`，之后使用全双工 JSON-RPC 2.0。
+- 非回环监听必须设置 `MY_AGENT_API_TOKEN`。
+- HTTP 无法弹出终端审批，因此需要审批的操作会安全拒绝。
+
+</details>
+
+<details>
+<summary><strong>Cron 与 MCP 配置示例</strong></summary>
+
+Cron：
 
 ```text
 /cron add nightly cron=0,2,*,*,* --retries=2 --backoff=10 检查项目并生成报告
@@ -178,7 +211,7 @@ Cron 示例：
 /cron remove quick --confirm
 ```
 
-MCP 配置示例（`command` 与 env key 不展开占位符；只在 `args`、env value、`cwd` 展开环境变量及 `${WORKSPACE_ROOT}`）：
+`.my-agent/mcp.json`：
 
 ```json
 {
@@ -193,37 +226,112 @@ MCP 配置示例（`command` 与 env key 不展开占位符；只在 `args`、en
 }
 ```
 
-保存后执行 `/mcp reload`；`/mcp list` 查看工具，`/mcp status` 查看逐 server 错误。当前只支持本地 stdio，不支持 streamable-http/SSE MCP。
+保存后运行 `/mcp reload`。当前只支持可信的本地 stdio MCP server，不支持远程 streamable-http/SSE transport。
 
-TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；左右键、Home/End、Ctrl+左右和 Ctrl+Backspace/Ctrl+W 可移动或删除，单行草稿用上下键浏览历史。PageUp/PageDown 翻页，Ctrl+上下逐行滚动，Ctrl+Home/End 跳转首尾；工具调用默认合并为摘要，Ctrl+T 会保留当前阅读位置并在原对话中展开/收起全部工具调用及其输出细节，Ctrl+K 清空发送队列，Ctrl+U 清空草稿，Ctrl+C 取消最近活动请求；模型等待、流式输出和工具执行期间，状态栏会持续显示不确定进度动画与当前阶段，审批和任务终态会停止动画并给出明确提示。任务结束时会显示明确的“任务完成”标记，滚离底部时会显示新消息数量和回到底部提示。按 Ctrl+/ 打开快捷键帮助（Mac 终端可用），Esc 在帮助打开时只关闭帮助，否则退出界面；空闲时也可输入 `/exit`，退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
+</details>
 
-TUI 默认使用 `terminal` 主题，主前景/背景继承终端，仅用 ANSI 状态色和 DIM/BOLD 表达层级，因此可跟随终端的浅色、深色或自定义配色。确认终端支持 truecolor 后，可用 `MY_AGENT_TUI_THEME=dark myagent` 或 `MY_AGENT_TUI_THEME=light myagent` 启用内置主题；若显示异常，取消该变量或设为 `terminal`。鼠标滚轮默认不截获，设 `MY_AGENT_TUI_MOUSE=1` 后才启用。
+## 可靠性设计
 
-HTTP 请求示例：
-
-```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"你的模型名","messages":[{"role":"user","content":"检查当前项目"}]}'
-```
-
-HTTP 入口不能弹终端审批，因此遇到需要批准的操作会安全地自动拒绝；CLI 可以通过 daemon 审批事件交互确认。
+- **严格工具装配**：乱序、重复完成、缺失参数或不完整 EOF 会整轮拒绝，不执行半批副作用。
+- **受控长任务**：主任务没有固定 ReAct 轮次上限，每 50 轮检查进度；完全相同调用与结果连续 10 次才按无进展熔断。
+- **失败恢复**：工具失败会回填模型修复；连续 3 次工具失败则终止并返回明确原因。
+- **断线恢复**：daemon 为活动请求保留最多 1 MiB 事件回放；重新 `session.load` + `agent.subscribe` 可继续接收输出和审批。
+- **平滑升级**：ready 标记记录可执行文件内容指纹；重新构建后会优雅停止旧 daemon，再使用新版本启动。
+- **进程清理**：`exec` 默认 300 秒超时；取消或超时会清理整个子进程组。
 
 ## 安全边界
 
-这是软安全边界，不是操作系统沙箱。`rm -rf /`、`mkfs`、块设备覆盖、fork 炸弹等会直接拒绝；`kill`、`sudo`、`git reset --hard`、跨工作区写入等会请求审批。MCP server 本身以当前用户权限启动，因此只应写入可信配置；每次 MCP 工具调用默认视为有副作用并审批，参数中的灾难命令仍硬拒、路径边界会进入审批提示。Cron 使用独立的无人值守审批器，任何需审批动作都拒绝。
+这是面向个人工作区的**软安全边界**，不是容器、namespace 或 seccomp 级沙箱。
 
-图片限制 16 MiB，base64 只存在于当前 turn 的临时消息，不写 session。PDF 限制 16 MiB、50 页和约 512K 字符，不做视觉渲染。
+| 操作 | 策略 |
+|---|---|
+| 工作区内读取 | 直接允许，可进入最多 8 路只读并行波次。 |
+| 工作区外读取 | 直接拒绝。 |
+| 工作区外写入/编辑 | 请求人工审批，默认拒绝。 |
+| `rm -rf /`、`mkfs`、块设备覆盖、fork 炸弹等 | 硬拒绝。 |
+| `kill`、`sudo`、`git reset --hard`、`cargo publish` 等 | 请求人工审批。 |
+| Cron 中任何需审批动作 | 无人值守安全拒绝。 |
+| 非回环 HTTP/WebSocket | 必须配置 Bearer Token。 |
 
-## 验证
+MCP server 以当前用户权限运行，只应连接可信本地配置。图片/PDF 限制 16 MiB；PDF 最多抽取 50 页和约 512K 字符，不做视觉渲染。
+
+## 配置参考
+
+<details>
+<summary><strong>常用环境变量</strong></summary>
+
+| 环境变量 | 默认值 | 作用 |
+|---|---:|---|
+| `API_TYPE` | `openai-chat` | `openai-chat`、`anthropic-messages` 或 `ollama`。 |
+| `OPENAI_API_KEY` | 无 | OpenAI/Anthropic 通用密钥变量；Ollama 不需要。 |
+| `OPENAI_BASE_URL` | Ollama 为 `http://127.0.0.1:11434` | Provider 服务根 URL。 |
+| `MODEL_NAME` | 无 | 模型名称。 |
+| `CONTEXT_TOKEN_BUDGET` | `32000` | 上下文 token 预算。 |
+| `CONTEXT_RECENT_MESSAGES` | `12` | 强压缩时保留的最近消息数。 |
+| `CONTEXT_MILD_PERCENT` | `60` | 温和压缩触发水位。 |
+| `CONTEXT_STRONG_PERCENT` | `85` | 强力压缩触发水位。 |
+| `MULTIMODAL_ENABLED` | 按模型名检测 | 显式开启/关闭图片内容块。 |
+| `SKILLS_DIR` | `.my-agent/skills` | 本地 Skill 目录。 |
+| `MY_AGENT_API_TOKEN` | 未设置 | 非回环 HTTP/WebSocket 的 Bearer Token。 |
+| `MY_AGENT_TUI_THEME` | `terminal` | `terminal`、`dark` 或 `light`。 |
+| `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 时捕获鼠标滚轮。 |
+| `MY_AGENT_EXEC_TIMEOUT_SECS` | `300` | `exec` 单次最长运行秒数。 |
+| `RUST_LOG` | `info` | daemon 日志过滤级别。 |
+
+</details>
+
+## 项目结构
+
+<details>
+<summary><strong>展开模块说明</strong></summary>
+
+```text
+src/main.rs                Clap 子命令与启动分发
+src/client.rs              Unix / 内存 DaemonClient
+src/daemon/                状态、协议、审批、运行时、生命周期、server
+src/entry/                 TUI、CLI、HTTP/WS、ACP 与恢复适配
+src/provider.rs            Provider 公共契约与 execution identity
+src/provider/              OpenAI、Anthropic、Ollama 适配器
+src/tool_calls.rs          canonical tool-call assembler
+src/loop_engine.rs         ReAct、取消、并行波次、熔断与结果回填
+src/context.rs             上下文排序、Skill、估算与两级压缩
+src/session.rs             稳定 session 与 append-only JSONL
+src/memory.rs              TTL 长期记忆与关键词/bigram 召回
+src/plan.rs                原子持久化计划
+src/sub_agent.rs           隔离上下文的受限子 Agent
+src/skills.rs              版本化 Skill 索引与按需加载
+src/cron.rs                Cron、重试与 heartbeat
+src/mcp.rs                 MCP stdio 客户端与工具桥接
+src/safety.rs              路径与命令安全决策点
+src/tools/                 内置工具注册、校验与执行
+```
+
+</details>
+
+## 开发与验证
 
 ```bash
 cargo fmt --all -- --check
-cargo build --release
 cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release
 ```
 
-自动化测试使用 mock Provider，不需要 API 密钥；真实模型端到端验证需要可用的兼容服务配置。
+测试使用本地 mock Provider，不需要真实 API Key。真实模型端到端测试需要自行提供对应服务配置。
 
-# agent-daemon-
+## 当前边界
+
+项目目前定位为个人、本地优先的编码 Agent，暂不提供：
+
+- 多租户与 RBAC
+- 容器或操作系统级沙箱
+- 向量数据库与自动 embedding 召回
+- 远程 MCP transport
+- Windows Named Pipe
+
+---
+
+<p align="center">
+  <strong>my-agent</strong> · Rust 构建 · daemon 驱动 · 本地优先<br>
+  <a href="./docs/agent-system.html">查看完整系统说明</a>
+</p>

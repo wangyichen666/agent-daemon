@@ -356,3 +356,29 @@
 - Query 锚点回归现包含“上一轮用户/Agent 消息 + 当前 Query + 80 行详情”，并断言锚点行号非零时当前 Query 仍可见；该定向测试通过。
 - 将测试包装函数收窄后，最终质量门禁全部通过：122/122 全量测试、严格 Clippy、格式检查、release 构建和 `git diff --check` 均为绿色。
 - 最终版已重新安装到 `/Users/pilot/.cargo/bin/my-agent` 与 `/Users/pilot/.local/bin/my-agent`；两者与仓库 `target/release/my-agent` 经 `cmp` 确认逐字节一致，`myagent`/`my-agent --version` 均正常返回 0.1.0。
+# 2026-09-12 项目展示 HTML 与 README
+
+- 用户希望先更新本地项目全景 HTML，再将其内容以美观、GitHub 友好的方式落到仓库 README，并上传 GitHub。
+- 实际找到两个文件：桌面 `/Users/pilot/Desktop/agent-system.html` 与仓库 `/Users/pilot/Documents/myproject/agent-rust/docs/agent-system.html`；文件名均为小写 `agent-system.html`。
+- 开始时 `main` 与 `origin/main` 一致，工作树干净，基准提交为 `60de04d`。
+- README 视觉实现需要遵守 GitHub 渲染限制：以 Markdown 和静态图片为主，不依赖 HTML 文件里的 CSS/JavaScript。
+- 桌面 HTML 与仓库 HTML 已不一致：仓库版已更新“主任务无固定轮次上限、每 50 轮进度检查、连续 10 次完全相同调用才熔断”；桌面版仍是旧的 50 轮硬上限。
+- 仓库 HTML 当前已有完整的 8 大版块和成熟视觉 CSS，但尚未写入 2026-09-12 的 TUI 显式清屏、Query 锚点内联详情、不确定进度动画，以及 daemon 二进制指纹/工作区日志等最新说明。
+- 当前 README 功能信息较完整，但首屏只有标题和长段落，缺少徽章、视觉封面、快速价值说明与可扫描导航；功能列表过长、架构和用法层级偏平，末尾还有多余的 `# agent-daemon-`。
+- README 应保留准确技术细节，同时重构为“品牌首屏 → 截图 → 为什么/能力矩阵 → 架构 → 快速开始 → 进阶能力 → 安全边界/限制 → 开发验证”的阅读路径。
+- 已视觉检查 `docs/tui-preview.png`：深色终端风格、蓝色品牌色、清晰的用户/Agent 层级和输入框，适合作为 GitHub README 首屏主视觉；但截图是较早版本，底栏仍显示旧的 `Ctrl+T 工具` 简写，未呈现最新动态进度条。
+- README 可直接引用仓库内 `docs/tui-preview.png`，GitHub 会稳定展示；HTML 则继续使用现有深色玻璃卡片/蓝青渐变视觉语言。
+- CLI 现有正式入口为默认 TUI、`chat`、`tui`、`serve`、`editor`、`status`、`stop`、`sessions`、`logs`、`config`；`logs` 支持按 session/request/行数过滤。
+- 共享 Slash 注册表包含 `/help`、`/status`、`/sessions`、`/resume`、`/new`、`/cancel`、`/skill`、`/cron`、`/mcp`、`/ping`、`/exit`，README 应避免只列旧命令子集。
+- HTML 当前采用暖色纸张背景、teal/amber 状态色、sticky 目录、卡片网格、时间线、终端代码块和响应式断点；视觉已经成熟，适合做内容增补而非彻底换肤。
+- HTML footer 日期仍为 2026-09-08，使用说明中的 TUI 文案未包含 Query 锚点、显式清屏和运行进度动画；“Cron / MCP”卡片却标为“可选项未做”，与正文“均已实现”矛盾，应改为已实现。
+- Cargo 元数据确认项目版本 0.1.0、Rust 2024 edition、MSRV 1.88；仓库暂无 LICENSE、GitHub Actions、CHANGELOG 或 CONTRIBUTING，因此 README 不应展示虚构的 license/CI 徽章。
+- README 徽章采用可核验的静态信息（Rust 1.88+、macOS/Linux、OpenAI/Anthropic/Ollama、ACP v1、MCP stdio），避免易过期的测试数量或不存在的 CI 状态。
+- HTML 已补齐最新功能，README 已完成整体改版并新增 `docs/readme-hero.svg`；直接用 `view_image` 读取 SVG 失败，需先渲染为临时 PNG 做视觉检查。
+- `xmllint` 验证 `readme-hero.svg` 为合法 XML。Quick Look 临时 PNG 显示暖灰纸张背景、teal 品牌胶囊、醒目的 my-agent 标题和指标卡片，中文字体清晰、视觉风格与 HTML 一致。
+- Quick Look 生成的是正方形缩略图并采用放大裁切，右侧指标卡未完整进入预览；这是缩略器行为，不代表 SVG viewBox 越界，仍需用浏览器按原始 1200×420 画布复核。
+- Codex 内置浏览器的安全策略禁止访问本地 `file://` 页面，因此无法直接打开 `docs/agent-system.html` 做浏览器交互预览；改用系统静态渲染与结构检查完成本地验收，并在推送后检查 GitHub 的真实渲染页面。
+- Quick Look 以 1600px 渲染 `docs/agent-system.html` 成功：首屏标题、说明、三个行动按钮、五项指标和 sticky 导航均完整可见，无明显横向溢出或文字遮挡；暖色纸张、teal 强调色与卡片层级保持一致。
+- HTMLParser 检查确认 `docs/agent-system.html` 标签完整闭合；README 的 3 个本地图片/文档引用均存在，MCP 示例 JSON 可被 `jq` 正常解析。
+- 系统自带 `tidy` 版本过旧，按非 UTF-8/非 HTML5 语义解析中文与 `<header>` 等标签，产生误报；不作为本轮质量门禁。
+- 使用 `sips` 将 `docs/readme-hero.svg` 按原始 1200×420 比例渲染后复核：标题、副标题、装饰线和四项指标全部位于画布内，中文清晰，无裁切、重叠或越界。

@@ -168,3 +168,19 @@
 - 全量测试 122/122 通过，但严格 Clippy 检出测试 helper 的生产 dead code；已用 `#[cfg(test)]` 收窄，待重新验证。
 - 修正后最终全量门禁全部通过；正在把最终 Query 锚点版本重新安装到两个实际命令位置。
 - 最终安装与逐字节一致性核对完成；三项问题修复已全部交付。
+# 2026-09-12 项目展示 HTML 与 README 更新
+
+- 已读取 planning-with-files 技能并新增阶段 0～4 计划。
+- 已定位桌面与仓库两份 HTML，确认 Git 分支/远端同步且工作树干净。
+- 当前阶段 0：审计 HTML、README 与当前源码功能。
+- 已完成桌面/仓库 HTML 差异和 README 结构初审；确认桌面版过期、README 信息完整但展示层需要整体改版。
+- 已完成 TUI 预览图视觉审查，决定将其作为 README 首屏主视觉，并在正文准确注明最新交互能力。
+- 已核对 CLI/Slash 命令与 HTML 全部版块，形成最新能力缺口清单；阶段 0 接近完成。
+- 已核对 Cargo 元数据和仓库配套文件，README 视觉方案确定为 SVG 品牌首图 + TUI 截图 + GitHub 原生 Markdown 信息架构。
+- HTML/README 初稿与 SVG 封面已落盘；SVG 直接预览工具不支持，已记录并切换到本地渲染方案。
+- SVG XML 校验通过，Quick Look 预览确认配色与排版方向正确；下一步进行浏览器原尺寸验收。
+- 本地浏览器因安全策略不能访问 `file://`；已改用 1600px Quick Look 渲染，HTML 首屏布局验收通过。
+- 阶段 0～2 已完成；HTML 标签闭合、README 本地引用和 JSON 示例检查通过，当前进入最终质量门禁与桌面同步。
+- README SVG 封面已按原始 1200×420 比例完成视觉验收，四项指标完整显示。
+- 桌面 `/Users/pilot/Desktop/agent-system.html` 已与仓库文档逐字节同步。
+- 最终本地门禁通过：`cargo test --all-targets` 122/122、`cargo fmt --all -- --check`、`git diff --check`、敏感信息扫描均正常；进入提交推送阶段。

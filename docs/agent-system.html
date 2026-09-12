@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="my-agent daemon、三入口、请求处理流程、工具、记忆与使用说明">
+  <meta name="description" content="my-agent daemon、多入口、请求处理流程、工具、记忆、安全与使用说明">
   <title>my-agent 系统说明</title>
   <style>
     :root {
@@ -94,10 +94,39 @@
 
     .lead {
       max-width: 790px;
-      margin-bottom: 32px;
+      margin-bottom: 24px;
       color: var(--muted);
       font-size: clamp(17px, 2.2vw, 22px);
     }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .hero-action {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding: 9px 16px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--ink);
+      background: rgba(255, 253, 248, 0.72);
+      font-size: 14px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .hero-action.primary {
+      border-color: var(--teal);
+      color: #fff;
+      background: var(--teal);
+    }
+
+    .hero-action:hover { transform: translateY(-1px); }
 
     .hero-strip {
       display: grid;
@@ -553,8 +582,13 @@
       stdio 入口连接同一个后台运行时；请求进入后再恢复记忆、组装上下文、规划、调用工具
       或委派子 Agent，最后把同一份事件流和可核验结果返回给调用端。
     </p>
+    <div class="hero-actions">
+      <a class="hero-action primary" href="#usage">5 分钟开始使用</a>
+      <a class="hero-action" href="https://github.com/wangyichen666/agent-daemon">查看 GitHub 仓库</a>
+      <a class="hero-action" href="#request-flow">理解请求全流程</a>
+    </div>
     <div class="hero-strip" aria-label="系统关键指标">
-      <div class="metric"><strong>3</strong><span>个对等瘦入口</span></div>
+      <div class="metric"><strong>4</strong><span>类对等交互入口</span></div>
       <div class="metric"><strong>8</strong><span>个可调用工具</span></div>
       <div class="metric"><strong>1</strong><span>个状态真相 daemon</span></div>
       <div class="metric"><strong>∞</strong><span>主任务无固定轮次上限</span></div>
@@ -597,13 +631,18 @@
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
-          <h3>三入口对等</h3>
+          <h3>四类入口对等</h3>
           <p>全屏 TUI、CLI、本地 OpenAI 兼容 HTTP/SSE + 全双工 WebSocket、标准 ACP v1 stdio 都复用同一 daemon。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>全屏终端 TUI</h3>
-          <p>直接运行 <code>myagent</code> 进入全屏界面：默认继承终端前景与背景，也内置 dark/light 语义主题。界面支持任务完成标记、默认折叠的工具调用摘要（Ctrl+T 可展开参数与输出细节）、CJK 安全编辑、消息换行缓存、滚动跟随、发送队列、多轮次与独立审批队列。</p>
+          <p>直接运行 <code>myagent</code> 进入全屏界面：启动时显式清屏并从顶部连续排版；默认继承终端主题，也内置 dark/light 语义色板。Ctrl+T 会锚定最近一条原 Query，在当前对话中内联展开工具参数与输出；模型等待、流式输出和工具执行期间持续显示不确定进度动画，审批与终态立即停止。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>可观测与平滑升级</h3>
+          <p>每轮模型、首个增量、工具耗时与成功状态按 session/request 写入工作区日志；<code>status</code> / <code>logs</code> 无需模型配置即可排障。ready 标记记录可执行文件指纹，新版本会优雅切换旧 daemon。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -641,7 +680,7 @@
           <p><code>plan</code> 维护可重写任务清单；Markdown 技能库只加载与当前请求匹配的正文。</p>
         </article>
         <article class="panel status-card">
-          <span class="badge limited">可选项未做</span>
+          <span class="badge done">已实现</span>
           <h3>Cron / MCP</h3>
           <p>Cron 已支持持久化 interval/五段表达式、独立 session、有限重试与无人值守安全拒绝；MCP 已支持本地 stdio server 的握手、工具发现、动态桥接、默认审批和进程清理。</p>
         </article>
@@ -834,7 +873,7 @@
         <article class="panel status-card">
           <span class="badge done">稳定性</span>
           <h3>重复操作软提醒</h3>
-          <p>连续三次出现相同工具名、参数指纹和结果指纹时，下一轮提示模型换思路或收尾；不会禁用工具，也不会把合法轮询误判成硬错误。</p>
+          <p>连续三次出现相同工具名、参数指纹和结果指纹时，下一轮先提示模型换思路或收尾；连续十次完全相同才按无进展循环熔断。工具执行连续失败三次则立即返回明确错误。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">长对话</span>
@@ -854,7 +893,7 @@
         <article class="panel status-card">
           <span class="badge done">运行时</span>
           <h3>工作区 Daemon</h3>
-          <p>稳定工作区哈希隔离 socket/PID/ready/log；支持就绪探测、并发启动锁、自动拉起、stale 清理和无活动任务时的空闲退出。</p>
+          <p>稳定工作区哈希隔离临时 socket/PID/ready，日志持久化到工作区 <code>.my-agent/daemon.log</code>；ready 标记包含二进制内容指纹，重新构建后可优雅停止旧 daemon 并切换新版本，同时保留并发启动锁、stale 清理和空闲退出。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">控制面</span>
@@ -937,7 +976,7 @@
         <div class="section-index">07 / ARCHITECTURE</div>
         <div>
           <h2>单 crate，清晰模块边界</h2>
-          <p class="section-copy">仍是一个可执行 crate，但运行时收拢在 daemon，三个入口只通过统一客户端和协议访问它。</p>
+          <p class="section-copy">仍是一个可执行 crate，但运行时收拢在 daemon，四类交互入口只通过统一客户端和协议访问它。</p>
         </div>
       </div>
       <div class="module-grid">
@@ -1013,8 +1052,8 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、默认折叠的工具摘要、任务完成标记和 sticky-bottom 新消息提示。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+T 展开/收起工具调用与输出细节，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；按 Ctrl+/ 打开快捷键帮助（Mac 终端可用）。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
-            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。另支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>。命令行还可用 <code>myagent status</code> 查看 daemon 日志路径、<code>myagent logs</code> 查看最近日志；这些诊断命令不需要模型环境变量。</li>
+            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、默认折叠的工具摘要、任务完成标记和 sticky-bottom 新消息提示。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+T 锚定本轮原 Query 并内联展开/收起工具细节，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；模型等待、流式输出、工具执行期间状态栏持续播放不确定进度动画，进入审批或终态后停止。按 Ctrl+/ 打开快捷键帮助（Mac 终端可用）。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
+            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。共享 Slash 命令还包括 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/skill</code>、<code>/cron</code>、<code>/mcp</code>、<code>/ping</code> 和 <code>/exit</code>。命令行可用 <code>myagent status</code> 查看 daemon 与日志路径，或用 <code>myagent logs --session ... --request ...</code> 精确过滤日志；这些诊断命令不需要模型环境变量。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
           </ol>
@@ -1032,7 +1071,7 @@
   </main>
 
   <footer class="footer">
-    <div class="shell">my-agent 当前实现说明 · 根据本仓库源码生成 · 2026-09-08</div>
+    <div class="shell">my-agent 当前实现说明 · 根据本仓库源码生成 · 更新于 2026-09-12</div>
   </footer>
 </body>
 </html>
