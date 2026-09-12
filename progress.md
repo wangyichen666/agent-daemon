@@ -186,3 +186,4 @@
 - 最终本地门禁通过：`cargo test --all-targets` 122/122、`cargo fmt --all -- --check`、`git diff --check`、敏感信息扫描均正常；进入提交推送阶段。
 - 文档提交 `b455ed6` 已推送到 `origin/main`；GitHub 仓库页已读取到新版 README。内置浏览器视觉加载连续超时，按既定错误策略停止重试。
 - 阶段 0～4 全部完成；补记最终状态后将再提交并推送规划记录，确保工作树干净。
+- 临时预览产物已移入 `/Users/pilot/.Trash/my-agent-doc-previews-20260912`，可恢复；最终记录待提交。

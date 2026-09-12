@@ -428,3 +428,4 @@
 | 内置浏览器安全策略拒绝本地 `file://` HTML | 1 | 不绕过策略，改用 Quick Look 1600px 静态渲染、HTMLParser 结构检查，并在推送后检查 GitHub 页面 |
 | 旧版 `tidy` 把 UTF-8/HTML5 标签误报为非法 | 1 | 不使用其结果作为门禁，改用 Python 标准库 HTMLParser 检查标签栈并结合实际渲染验收 |
 | 推送后内置浏览器加载 GitHub 页面超时并重置会话 | 2 | GitHub 文本抓取已确认新版 README 生效，且本地原尺寸视觉验收已通过；停止重复浏览器尝试 |
+| 临时预览清理脚本使用 `path` 覆盖 zsh 的 PATH 数组 | 1 | 改用 `preview_item` 变量并显式调用 `/bin/mv`、`/usr/bin/find`；预览文件已移入可恢复的废纸篓目录 |
