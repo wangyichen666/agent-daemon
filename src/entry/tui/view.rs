@@ -7,7 +7,9 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{RenderCacheKey, ToolStatus, TuiState, TuiThemeMode, UiMessage, UiMessageKind};
+use super::{
+    ActivityPhase, RenderCacheKey, ToolStatus, TuiState, TuiThemeMode, UiMessage, UiMessageKind,
+};
 use crate::provider::Role;
 
 #[derive(Clone, Copy)]
@@ -168,46 +170,59 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
                 theme.text(workspace, theme.foreground),
                 theme.muted_text(format!("  ·  session {session_label}")),
             ]),
-            Line::from(theme.muted_text("对话 · 规划 · 工具执行   ·   F1 查看快捷键")),
+            Line::from(theme.muted_text("对话 · 规划 · 工具执行   ·   Ctrl+/ 查看快捷键")),
         ]),
         regions[0],
     );
 
     let message_width = width.saturating_sub(2);
-    let lines = if state.messages.is_empty() {
-        vec![
-            Line::default(),
-            Line::from(theme.text("从一个想法开始。", theme.foreground)),
-            Line::default(),
-            Line::from(theme.muted_text("  读取 README，帮我了解这个项目")),
-            Line::from(theme.muted_text("  先制定计划，再为项目补充测试")),
-            Line::from(theme.muted_text("  调研配置读取位置，只返回结论")),
-            Line::default(),
-            Line::from(theme.muted_text("  /resume  恢复历史会话")),
-        ]
+    let anchor_message_id = state.preserve_message_id.take();
+    let (lines, message_anchor) = if state.messages.is_empty() {
+        (
+            vec![
+                Line::default(),
+                Line::from(theme.text("从一个想法开始。", theme.foreground)),
+                Line::default(),
+                Line::from(theme.muted_text("  读取 README，帮我了解这个项目")),
+                Line::from(theme.muted_text("  先制定计划，再为项目补充测试")),
+                Line::from(theme.muted_text("  调研配置读取位置，只返回结论")),
+                Line::default(),
+                Line::from(theme.muted_text("  /resume  恢复历史会话")),
+            ],
+            None,
+        )
     } else {
         let messages = state.messages.clone();
-        messages
-            .iter()
-            .flat_map(|message| cached_message_lines(state, message, message_width, theme))
-            .collect()
+        transcript_lines_with_anchor(state, &messages, message_width, theme, anchor_message_id)
     };
     let lines = if state.messages.is_empty() {
         wrap_lines(lines, message_width)
     } else {
         lines
     };
-    let max_scroll = lines.len().saturating_sub(usize::from(regions[1].height));
-    if state.follow_bottom {
+    let viewport_height = usize::from(regions[1].height);
+    let max_scroll = lines.len().saturating_sub(viewport_height);
+    let preserved_start = state.preserve_transcript_start.take();
+    let start = if let Some(anchor) = message_anchor.or(preserved_start) {
+        let start = anchor.min(max_scroll);
+        state.scroll = max_scroll.saturating_sub(start);
+        state.follow_bottom = state.scroll == 0;
+        if state.follow_bottom {
+            state.unread_messages = 0;
+        }
+        start
+    } else if state.follow_bottom {
         state.scroll = 0;
+        max_scroll
     } else {
         state.scroll = state.scroll.min(max_scroll);
-    }
-    let start = max_scroll.saturating_sub(state.scroll);
+        max_scroll.saturating_sub(state.scroll)
+    };
+    state.transcript_start = start;
     let visible: Vec<_> = lines
         .into_iter()
         .skip(start)
-        .take(usize::from(regions[1].height))
+        .take(viewport_height)
         .collect();
     frame.render_widget(
         Paragraph::new(visible).style(theme.style(theme.foreground)),
@@ -331,12 +346,12 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     }
     let status = status_line(state, theme, width);
     let footer = if width >= 90 {
-        "Enter 发送 · Alt↵ 换行 · PgUp/Dn 翻页 · Ctrl+↑↓ 滚动 · Ctrl+End 回底 · F1 帮助 · Esc 退出"
+        "Enter 发送 · Alt↵ 换行 · PgUp/Dn 翻页 · Ctrl+↑↓ 滚动 · Ctrl+End 回底 · Ctrl+/ 帮助 · Esc 退出"
             .to_owned()
     } else if width >= 55 {
-        "Enter 发送 · Ctrl+C 取消 · Ctrl+End 回底 · F1 帮助 · Esc 退出".to_owned()
+        "Enter 发送 · Ctrl+C 取消 · Ctrl+End 回底 · Ctrl+/ 帮助 · Esc 退出".to_owned()
     } else {
-        "Enter 发送 · F1 帮助 · Esc 退出".to_owned()
+        "Enter 发送 · Ctrl+/ 帮助 · Esc 退出".to_owned()
     };
     frame.render_widget(
         Paragraph::new(status).style(theme.muted_style()),
@@ -367,12 +382,46 @@ fn status_line(state: &TuiState, theme: Theme, width: u16) -> Line<'static> {
     } else {
         format!("{} 个审批待处理", state.pending_approvals.len())
     };
-    let compact = truncate_text(&state_text, usize::from(width.saturating_sub(28)));
+    let (indicator, indicator_color) = match state.activity_phase {
+        ActivityPhase::WaitingApproval => ("◆ ".to_owned(), theme.warm),
+        phase if phase.is_animated() => (
+            indeterminate_indicator(state.animation_tick, width >= 55),
+            theme.info,
+        ),
+        _ if state.status.contains("失败") || state.status.contains("中断") => {
+            ("✗ ".to_owned(), theme.error)
+        }
+        _ => ("● ".to_owned(), theme.success),
+    };
+    let reserved = indicator.width() + activity.width() + 3;
+    let compact = truncate_text(&state_text, usize::from(width).saturating_sub(reserved));
     Line::from(vec![
-        Span::styled("● ", theme.style(theme.success)),
+        Span::styled(indicator, theme.style(indicator_color)),
         Span::styled(compact, theme.style(theme.foreground)),
         theme.muted_text(format!("   {activity}")),
     ])
+}
+
+fn indeterminate_indicator(tick: u64, show_bar: bool) -> String {
+    const SPINNERS: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    let spinner = SPINNERS[(tick as usize) % SPINNERS.len()];
+    if !show_bar {
+        return format!("{spinner} ");
+    }
+    const WIDTH: usize = 8;
+    let cycle = WIDTH * 2 - 2;
+    let step = (tick as usize) % cycle;
+    let head = if step < WIDTH { step } else { cycle - step };
+    let bar = (0..WIDTH)
+        .map(|index| {
+            if index == head || index + 1 == head {
+                '━'
+            } else {
+                '·'
+            }
+        })
+        .collect::<String>();
+    format!("{spinner} [{bar}] ")
 }
 
 fn render_help(frame: &mut Frame<'_>, state: &TuiState, theme: Theme, content: Rect) {
@@ -396,10 +445,10 @@ fn render_help(frame: &mut Frame<'_>, state: &TuiState, theme: Theme, content: R
         Line::from("Ctrl+↑ / ↓   滚动对话"),
         Line::from("Ctrl+Home    跳到对话顶部"),
         Line::from("Ctrl+End     回到底部"),
-        Line::from("Ctrl+T       展开/收起工具输出"),
+        Line::from("Ctrl+T       展开/收起工具调用与输出（默认折叠）"),
         Line::from("Ctrl+K       清空排队消息"),
         Line::from("Ctrl+C       取消当前请求"),
-        Line::from("F1 / Ctrl+/  打开/关闭帮助"),
+        Line::from("Ctrl+/       打开/关闭帮助"),
         Line::from("Esc          关闭帮助 / 退出"),
         Line::from(""),
         Line::from(Span::styled(
@@ -470,6 +519,116 @@ fn cached_message_lines(
     lines
 }
 
+#[cfg(test)]
+fn transcript_lines(
+    state: &mut TuiState,
+    messages: &[UiMessage],
+    width: u16,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    transcript_lines_with_anchor(state, messages, width, theme, None).0
+}
+
+fn transcript_lines_with_anchor(
+    state: &mut TuiState,
+    messages: &[UiMessage],
+    width: u16,
+    theme: Theme,
+    anchor_message_id: Option<u64>,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let mut lines = Vec::new();
+    let mut anchor_start = None;
+    let mut index = 0;
+    while index < messages.len() {
+        if !state.show_tools && matches!(messages[index].kind, UiMessageKind::Tool(_)) {
+            let start = index;
+            while index < messages.len() && matches!(messages[index].kind, UiMessageKind::Tool(_)) {
+                index += 1;
+            }
+            lines.extend(collapsed_tool_group(&messages[start..index], theme));
+        } else {
+            if anchor_message_id == Some(messages[index].id) {
+                anchor_start = Some(lines.len());
+            }
+            lines.extend(cached_message_lines(state, &messages[index], width, theme));
+            index += 1;
+        }
+    }
+    (lines, anchor_start)
+}
+
+fn collapsed_tool_group(messages: &[UiMessage], theme: Theme) -> Vec<Line<'static>> {
+    let tools = messages
+        .iter()
+        .filter_map(|message| match &message.kind {
+            UiMessageKind::Tool(tool) => Some(tool),
+            UiMessageKind::Text(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return Vec::new();
+    }
+    let failed = tools
+        .iter()
+        .filter(|tool| tool.status == ToolStatus::Failed)
+        .count();
+    let running = tools
+        .iter()
+        .filter(|tool| tool.status == ToolStatus::Running)
+        .count();
+    let total_ms = tools
+        .iter()
+        .filter_map(|tool| tool.duration_ms)
+        .sum::<u64>();
+    let names = tools
+        .iter()
+        .take(4)
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
+    let names = if tools.len() > 4 {
+        format!("{names}…")
+    } else {
+        names
+    };
+    let status = if running > 0 {
+        ("○", "执行中", theme.info)
+    } else if failed > 0 {
+        ("✗", "有失败", theme.error)
+    } else {
+        ("●", "已完成", theme.success)
+    };
+    let rounds = tools
+        .iter()
+        .map(|tool| tool.round)
+        .min()
+        .zip(tools.iter().map(|tool| tool.round).max());
+    let round_label = rounds.map_or_else(String::new, |(first, last)| {
+        if first == last {
+            format!(" · 第 {first} 轮")
+        } else {
+            format!(" · 第 {first}-{last} 轮")
+        }
+    });
+    let duration_label = if total_ms == 0 {
+        String::new()
+    } else {
+        format!(" · {:.1}s", total_ms as f32 / 1000.0)
+    };
+    vec![Line::from(theme.text(
+        format!(
+            "  {} 工具调用已折叠 · {} 次 · {}{}{} · {} · Ctrl+T 展开详情",
+            status.0,
+            tools.len(),
+            status.1,
+            round_label,
+            duration_label,
+            names
+        ),
+        status.2,
+    ))]
+}
+
 fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Line<'static>> {
     let UiMessageKind::Text(content) = &message.kind else {
         let UiMessageKind::Tool(tool) = &message.kind else {
@@ -480,25 +639,30 @@ fn message_lines(message: &UiMessage, show_tools: bool, theme: Theme) -> Vec<Lin
             ToolStatus::Ok => "●",
             ToolStatus::Failed => "✗",
         };
-        let elapsed = tool
-            .finished_at
-            .map(|finished| {
-                format!(
-                    " · {:.1}s",
-                    finished.duration_since(tool.started_at).as_secs_f32()
-                )
-            })
-            .unwrap_or_default();
-        let expanded = tool
-            .expanded
-            .unwrap_or(show_tools || tool.status == ToolStatus::Failed);
+        let elapsed = tool.duration_ms.map_or_else(
+            || {
+                tool.finished_at
+                    .map(|finished| {
+                        format!(
+                            " · {:.1}s",
+                            finished.duration_since(tool.started_at).as_secs_f32()
+                        )
+                    })
+                    .unwrap_or_default()
+            },
+            |duration_ms| format!(" · {:.1}s", duration_ms as f32 / 1000.0),
+        );
+        let expanded = tool.expanded.unwrap_or(show_tools);
         let status_color = match tool.status {
             ToolStatus::Running => theme.info,
             ToolStatus::Ok => theme.success,
             ToolStatus::Failed => theme.error,
         };
         let mut lines = vec![Line::from(theme.text(
-            format!("  {icon} 工具  {}{elapsed}", tool.heading),
+            format!(
+                "  {icon} 工具  第 {} 轮 · {}{elapsed}",
+                tool.round, tool.heading
+            ),
             status_color,
         ))];
         if expanded {
@@ -671,12 +835,15 @@ mod tests {
             turn_id.clone(),
             Some("preview-read".into()),
             "read_file".into(),
+            1,
         );
         state.finish_tool(
             &turn_id,
             Some("preview-read"),
             "read_file",
             "原始工具输出默认收起",
+            true,
+            12,
         );
         state.push_text(Role::Assistant, "## 一个专注个人开发的编码助手\n\n项目使用 **Rust**，由工作区 daemon 管理会话和工具执行。\n\n### 现在可以做什么\n- 读取与修改代码，运行测试\n- 用 `plan` 拆解任务，用子 Agent 调研\n- 在 CLI、ACP 和 WebSocket 之间恢复会话\n\n### 从这里开始\n```bash\nmyagent chat \"读取 README 并总结\"\n```\n\n建议先为配置模块补充测试，再逐步改进交互体验。".into());
         state
@@ -708,6 +875,7 @@ mod tests {
     #[test]
     fn caches_wrapped_messages_by_content_version_and_width() {
         let mut state = fixture();
+        state.show_tools = true;
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
         let cached = state.render_cache.len();
@@ -722,6 +890,144 @@ mod tests {
         state.messages[2].content_version += 1;
         terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
         assert!(state.render_cache.len() > cached);
+    }
+
+    #[test]
+    fn collapses_tool_runs_by_default_and_expands_details_on_toggle() {
+        let mut state = fixture();
+        let messages = state.messages.clone();
+        let collapsed = transcript_lines(
+            &mut state,
+            &messages,
+            100,
+            Theme::new(TuiThemeMode::Terminal),
+        );
+        let collapsed_text = collapsed
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(collapsed_text.contains("工具调用已折叠"));
+        assert!(!collapsed_text.contains("原始工具输出默认收起"));
+
+        state.show_tools = true;
+        let messages = state.messages.clone();
+        let expanded = transcript_lines(
+            &mut state,
+            &messages,
+            100,
+            Theme::new(TuiThemeMode::Terminal),
+        );
+        let expanded_text = expanded
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(expanded_text.contains("原始工具输出默认收起"));
+    }
+
+    #[test]
+    fn expanding_tool_details_keeps_the_original_query_in_view() {
+        let mut state = TuiState::from_snapshot(RecoverySnapshot {
+            session_id: "anchor-preview".into(),
+            messages: vec![],
+            pending_approvals: vec![],
+            active_requests: vec![],
+        });
+        state.workspace = "workspace".into();
+        state.push_text(Role::User, "上一轮 Query".into());
+        state.push_text(
+            Role::Assistant,
+            "上一轮回答第一行\n上一轮回答第二行\n上一轮回答第三行".into(),
+        );
+        state.push_text(Role::User, "这是必须保留可见的原始 Query".into());
+        let turn_id = crate::daemon::protocol::RequestId::String("anchor-turn".into());
+        state.start_tool(turn_id.clone(), Some("long-tool".into()), "exec".into(), 1);
+        state.finish_tool(
+            &turn_id,
+            Some("long-tool"),
+            "exec",
+            &(0..80)
+                .map(|index| format!("工具详情第 {index} 行"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            true,
+            100,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        assert!(
+            buffer_text(terminal.backend().buffer())
+                .replace(' ', "")
+                .contains("原始Query")
+        );
+
+        state.toggle_tool_details();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        let expanded = buffer_text(terminal.backend().buffer()).replace(' ', "");
+        assert!(expanded.contains("原始Query"));
+        assert!(expanded.contains("工具详情第0行"));
+        assert!(!state.follow_bottom);
+        assert!(state.transcript_start > 0);
+    }
+
+    #[test]
+    fn short_transcript_starts_near_the_top_of_the_screen() {
+        let mut state = TuiState::from_snapshot(RecoverySnapshot {
+            session_id: "top-preview".into(),
+            messages: vec![],
+            pending_approvals: vec![],
+            active_requests: vec![],
+        });
+        state.workspace = "workspace".into();
+        state.push_text(Role::User, "短 Query".into());
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        let rows = buffer_text(terminal.backend().buffer())
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let header_row = rows
+            .iter()
+            .position(|row| row.contains("my-agent"))
+            .expect("标题应可见");
+        let query_row = rows
+            .iter()
+            .position(|row| row.contains('›'))
+            .expect("Query 应可见");
+        assert!(header_row <= 2);
+        assert!(query_row <= 6);
+    }
+
+    #[test]
+    fn active_status_uses_an_animated_indeterminate_progress_bar() {
+        let mut state = fixture();
+        state.activity_phase = ActivityPhase::WaitingModel;
+        state.status = "等待模型响应".into();
+        state.animation_tick = 0;
+        let first = status_line(&state, Theme::new(TuiThemeMode::Terminal), 80)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        state.advance_animation();
+        let second = status_line(&state, Theme::new(TuiThemeMode::Terminal), 80)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(first.contains('[') && first.contains(']'));
+        assert_ne!(first, second);
+
+        state.activity_phase = ActivityPhase::WaitingApproval;
+        let approval = status_line(&state, Theme::new(TuiThemeMode::Terminal), 80)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(approval.starts_with("◆ "));
+        assert!(!approval.contains('['));
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {

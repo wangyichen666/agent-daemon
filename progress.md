@@ -139,3 +139,32 @@
 - 2026-09-09 开始 OpenClaude TUI 对比：确认其分层 transcript、sticky-bottom/新消息 pill、动态 prompt 高度、footer/status line、快捷键帮助和紧凑工具反馈模式。
 - 已完成 TUI 改造：消息区改为紧凑层级化 transcript；底部拆分状态线/快捷键线；滚离底部累计 unread 并显示回底部提示；F1/Ctrl+/ 帮助浮层；prompt 高度随终端高度动态上限；粘贴和鼠标滚动在帮助浮层打开时不会穿透。
 - TUI 渲染回归增至 14 项，完整 `cargo test --all-targets` 增至 111/111；严格 Clippy、fmt、release 构建、`cargo install --path . --force` 和 `myagent --version` 验证通过；README、仓库 HTML 与桌面 HTML 已同步快捷键说明。
+- 2026-09-09 Agent 不可用修复完成：`write_file` 自动建目录；LoopEngine 对准入/装配/执行连续 3 次失败熔断；日志记录 session/request、ReAct round、Provider 首增量/总耗时、工具耗时和成功状态；TUI/CLI/ACP 展示失败 telemetry；新增 `myagent logs`，`status/sessions` 可在无模型环境下排障；系统提示补充模糊前端请求默认行为。113/113 测试、Clippy、fmt、release 通过，已安装并重启空闲测试工作区 daemon。
+- 2026-09-09 TUI 优化完成：连续工具调用默认合并为可展开摘要，Ctrl+T 展示工具调用和输出细节；每个请求完成或失败都会在 transcript 和状态栏给出明确终态。新增回归后 115/115 测试、Clippy、fmt、release 构建和安装全绿；`myagent`/`my-agent` 已更新，桌面 HTML 已同步。
+- 2026-09-09 Mac UX 微调：将 TUI 所有用户可见的 F1 帮助提示改为 `Ctrl+/`，保留 F1 兼容输入；115/115 测试、Clippy、fmt、release 构建和安装再次通过。
+- 2026-09-09 Agent 不可用诊断完成：真实 session JSONL 证明“给我写一个前端”最终已完成，截图截取的是 `write_file` 目录不存在后的失败/恢复阶段；确认当前 `write_file` 不自动创建父目录、LoopEngine 无连续工具失败熔断、默认日志缺少 request/round/provider telemetry，且 `myagent sessions` 被环境变量校验阻断排障。未修改生产代码。
+# 2026-09-12 TUI 三项体验修复
+
+- 已收到用户“现在开始修复”的明确授权。
+- 已读取 planning-with-files 技能并复用仓库现有规划文件，新增阶段 0～4 的修复计划。
+- 当前处于阶段 0：读取相关 TUI 状态、布局、事件处理和测试，定位三项问题根因。
+- 已确认 Ctrl+T 跳屏来自 `show_tools` 展开后仍 follow-bottom；持续运行反馈缺失来自无事件时不重绘。继续核对空白问题和当前源码基线。
+- `cargo test entry::tui --all-targets` 基线通过 16/16；现有测试覆盖缺口已确认。
+- 已定位依赖源码实际为 `ratatui-core 0.1.2`；首次版本目录猜测错误已记入计划。
+- 已排除 Inline viewport 导致布局下沉；继续检查首帧清屏与 transcript 对齐逻辑。
+- 阶段 0 完成；三项修复第一版已落地且 `cargo check --all-targets` 通过，当前补回归测试与边界修正。
+- TUI 定向回归 19/19 通过；进入实现审查与全量验证阶段。
+- diff check 与严格 Clippy 通过；准备全量测试和 release 构建。
+- `cargo test --all-targets` 122/122 通过。
+- 格式检查与 release 构建通过；下一步做隔离 PTY 烟雾测试和本机安装。
+- 隔离 PTY 烟雾测试通过：清屏、顶部绘制、Esc 退出和终端恢复均符合预期。
+- 已清理隔离 PTY 临时目录（移入废纸篓，可恢复）。
+- 已更新 README/已知问题记录并完成 `cargo install`；正在核对 `myagent` 命令解析和最终工作树状态。
+- 已同时更新 `myagent` 指向的 release 产物和 PATH 优先命中的 `/Users/pilot/.local/bin/my-agent`。
+- 最终核对中发现 locale 导致 `shasum` 不可用，以及 rustfmt 带来一处无关文件格式变化；已记录，正在用 `cmp` 替代并精确还原无关 diff。
+- 已澄清 lifecycle diff 是独立的语义改动并保持不动；`cmp` 证明三份安装/构建二进制逐字节一致。本轮阶段 0～4 全部完成。
+- Ctrl+T 已增强为消息级 Query 锚点，定向测试保持全绿；需重跑最终全量门禁并重新安装这一版。
+- 多轮非零行锚点回归通过；开始最后一次全量门禁。
+- 全量测试 122/122 通过，但严格 Clippy 检出测试 helper 的生产 dead code；已用 `#[cfg(test)]` 收窄，待重新验证。
+- 修正后最终全量门禁全部通过；正在把最终 Query 锚点版本重新安装到两个实际命令位置。
+- 最终安装与逐字节一致性核对完成；三项问题修复已全部交付。

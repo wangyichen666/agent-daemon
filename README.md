@@ -5,7 +5,7 @@
 ## 功能
 
 - 多 Provider：原生支持 OpenAI Chat Completions、Anthropic Messages 与 Ollama；协议差异封装在各自适配器内，统一输出文本与严格 tool-call 生命周期事件。
-- 全屏终端 TUI：默认继承终端前景/背景，也内置深色与浅色语义主题。支持层级化 transcript、结构化工具卡片、CJK 安全编辑、消息换行缓存、sticky-bottom 新消息提示、发送队列、多轮次与审批队列。
+- 全屏终端 TUI：默认继承终端前景/背景，也内置深色与浅色语义主题。支持层级化 transcript、任务完成标记、默认折叠的工具调用摘要（Ctrl+T 展开参数/输出细节）、CJK 安全编辑、消息换行缓存、sticky-bottom 新消息提示、发送队列、多轮次与审批队列。
 - 8 个工具：`read_file`、`write_file`、`edit_file`、`exec`、`remember`、`recall_memory`、`plan`、`sub_agent`。
 - `read_file` 可把 PNG/JPEG/WebP 作为视觉内容块发送，并在本地抽取最多 50 页 PDF 文字。
 - `plan` 管理可重写任务步骤；`sub_agent` 用全新历史、受限工具和最多 15 轮预算执行独立子任务，不能递归派生。
@@ -13,9 +13,10 @@
 - 三条记忆链路：append-only 会话、60%/85% 两级上下文摘要、TTL 长期记忆。
 - 每个 TUI/REPL/ACP 窗口启动时都创建并持有独立的空白 session；同一台电脑可以同时运行多个窗口，活动请求、历史、审批和取消互不阻塞或串线。历史会话保留稳定 ID，可用 `/resume` 查看摘要并按编号或 ID 恢复。
 - JSON Schema 参数校验、统一路径边界、灾难命令硬拒、跨工作区写入和高风险命令审批。
-- 同轮连续只读工具最多 8 路并行，副作用工具串行；连续三次完全相同的工具调用与结果只做软提醒。
+- 同轮连续只读工具最多 8 路并行，副作用工具串行；工具失败会回填给模型修复，连续 3 次失败自动熔断并返回明确原因。主任务没有固定 ReAct 轮次硬上限，每 50 轮只做进度检查并继续；完全相同的调用和结果连续 10 次才按无进展循环熔断。子 Agent 仍使用独立轮次预算。
+- `write_file` 会自动创建缺失的父目录；每轮模型响应、首个流式增量和工具耗时都会写入工作区 `.my-agent/daemon.log`，且关联 `session_id/request_id`；TUI/CLI 显示轮次、成功/失败与耗时。
 - 显式按 request id 取消；不使用挂钟超时强杀正在执行的 turn。
-- daemon 使用工作区稳定哈希隔离 socket/PID/ready/log；启动探测、并发启动锁、失效标记清理和最后客户端断开后的空闲退出均已实现。
+- daemon 使用工作区稳定哈希隔离临时 socket/PID/ready，并把可追溯日志持久化到各工作区；ready 标记包含二进制内容指纹，重新构建或升级后会优雅停止旧 daemon 并切换到新版本；启动探测、并发启动锁、失效标记清理和最后客户端断开后的空闲退出均已实现。
 - 本地 HTTP 提供 `/health` 与 `/v1/chat/completions`，支持普通 JSON 与 SSE；同一服务的 `/ws` 提供全双工 JSON-RPC、事件流和交互审批；非回环监听必须配置 Bearer Token。
 - 编辑器入口实现标准 ACP v1（`agent-client-protocol`），支持 initialize、session/new/load、prompt、cancel、工具更新和 typed 权限请求。
 - 连接断开后可恢复：daemon 按 session 保留活动 turn、待审批和最多 1 MiB 事件回放；ACP `session/load` 与 WebSocket 重连可继续消费，不会因断线自动批准或拒绝。
@@ -128,12 +129,12 @@ export MODEL_NAME='你的模型名'
 | `CRON_RUN_TIMEOUT_SECS` | `600` | 单次定时任务超时 |
 | `HEARTBEAT_ENABLED` | `false` | 启用不调用模型的轻量自检 |
 | `HEARTBEAT_INTERVAL_SECS` | `300` | Heartbeat 间隔 |
-| `MY_AGENT_RUNTIME_DIR` | 系统临时目录 | daemon socket/PID/ready/log 根目录 |
+| `MY_AGENT_RUNTIME_DIR` | 系统临时目录 | daemon socket/PID/ready 根目录；日志固定保存在工作区 `.my-agent/daemon.log` |
 | `MY_AGENT_API_TOKEN` | 未设置 | HTTP Bearer Token；非回环监听必填 |
 | `MY_AGENT_TUI_THEME` | `terminal` | TUI 主题；`terminal` 继承终端颜色，`dark`/`light` 使用内置语义色板 |
 | `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 后开启 crossterm 鼠标滚轮捕获 |
 | `MY_AGENT_EXEC_TIMEOUT_SECS` | `300` | `exec` 工具单次命令最长运行秒数；取消或超时会清理整个子进程组 |
-| `RUST_LOG` | `warn` | tracing 日志过滤 |
+| `RUST_LOG` | `info` | tracing 日志过滤；排障时可设为 `debug` 查看工具调用参数（会话完整消息仍保存在 `.my-agent/session*.jsonl`） |
 
 ## 使用
 
@@ -147,9 +148,11 @@ export MODEL_NAME='你的模型名'
 # 一次性提问
 ./target/release/my-agent chat "读取 README 并总结架构"
 
-# 运行状态、会话与停止
+# 运行状态、会话、日志与停止（status/logs/sessions 不需要模型环境变量）
 ./target/release/my-agent status
 ./target/release/my-agent sessions
+./target/release/my-agent logs --lines 100
+./target/release/my-agent logs --session session-178921315 --request 2 --lines 200
 ./target/release/my-agent stop
 
 # 本地 OpenAI 兼容 API
@@ -192,7 +195,7 @@ MCP 配置示例（`command` 与 env key 不展开占位符；只在 `args`、en
 
 保存后执行 `/mcp reload`；`/mcp list` 查看工具，`/mcp status` 查看逐 server 错误。当前只支持本地 stdio，不支持 streamable-http/SSE MCP。
 
-TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；左右键、Home/End、Ctrl+左右和 Ctrl+Backspace/Ctrl+W 可移动或删除，单行草稿用上下键浏览历史。PageUp/PageDown 翻页，Ctrl+上下逐行滚动，Ctrl+Home/End 跳转首尾；Ctrl+T 展开/收起工具详情，Ctrl+K 清空发送队列，Ctrl+U 清空草稿，Ctrl+C 取消最近活动请求；滚离底部时会显示新消息数量和回到底部提示。F1 或 Ctrl+/ 打开快捷键帮助，Esc 在帮助打开时只关闭帮助，否则退出界面；空闲时也可输入 `/exit`，退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
+TUI 中 Enter 发送，Alt+Enter 换行，支持多行粘贴；左右键、Home/End、Ctrl+左右和 Ctrl+Backspace/Ctrl+W 可移动或删除，单行草稿用上下键浏览历史。PageUp/PageDown 翻页，Ctrl+上下逐行滚动，Ctrl+Home/End 跳转首尾；工具调用默认合并为摘要，Ctrl+T 会保留当前阅读位置并在原对话中展开/收起全部工具调用及其输出细节，Ctrl+K 清空发送队列，Ctrl+U 清空草稿，Ctrl+C 取消最近活动请求；模型等待、流式输出和工具执行期间，状态栏会持续显示不确定进度动画与当前阶段，审批和任务终态会停止动画并给出明确提示。任务结束时会显示明确的“任务完成”标记，滚离底部时会显示新消息数量和回到底部提示。按 Ctrl+/ 打开快捷键帮助（Mac 终端可用），Esc 在帮助打开时只关闭帮助，否则退出界面；空闲时也可输入 `/exit`，退出保留 daemon 中尚在运行的任务。字母 `q` 作为正常文本输入。
 
 TUI 默认使用 `terminal` 主题，主前景/背景继承终端，仅用 ANSI 状态色和 DIM/BOLD 表达层级，因此可跟随终端的浅色、深色或自定义配色。确认终端支持 truecolor 后，可用 `MY_AGENT_TUI_THEME=dark myagent` 或 `MY_AGENT_TUI_THEME=light myagent` 启用内置主题；若显示异常，取消该变量或设为 `terminal`。鼠标滚轮默认不截获，设 `MY_AGENT_TUI_MOUSE=1` 后才启用。
 

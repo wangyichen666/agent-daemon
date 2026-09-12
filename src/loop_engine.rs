@@ -2,12 +2,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use tokio::sync::{Notify, mpsc};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::context::ContextManager;
 use crate::provider::{Message, Provider, Response, Role, ToolCall};
@@ -15,9 +16,12 @@ use crate::session::SessionStore;
 use crate::tool_calls::ToolCallAssembler;
 use crate::tools::{ToolCancellation, ToolOutput, ToolRegistry};
 
-pub const DEFAULT_MAX_ROUNDS: usize = 50;
+pub const DEFAULT_PROGRESS_CHECKPOINT_ROUNDS: usize = 50;
+pub const MAX_CONSECUTIVE_TOOL_FAILURES: usize = 3;
 const REPETITION_THRESHOLD: usize = 3;
+const REPETITION_ABORT_THRESHOLD: usize = 10;
 const REPETITION_REMINDER: &str = "检测到连续重复的工具调用、参数与结果。可以继续使用任何工具，但请先判断该重复是否必要；若没有新信息，考虑换个思路或直接给出结论。";
+const PROGRESS_CHECKPOINT_REMINDER: &str = "这是一次长任务的进度检查点，不是终止信号。请核对当前计划和已完成工作：若任务已经完成，立即给出最终结论；若仍有必要工作，继续执行剩余步骤，避免重做已经完成的内容。";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
@@ -26,11 +30,16 @@ pub enum AgentEvent {
     ToolStarted {
         call_id: String,
         name: String,
+        round: usize,
     },
     ToolFinished {
         call_id: String,
         name: String,
         output: String,
+        round: usize,
+        duration_ms: u64,
+        success: bool,
+        error: Option<String>,
     },
     TurnCompleted {
         content: String,
@@ -92,7 +101,7 @@ pub struct LoopEngine {
     tools: ToolRegistry,
     context: ContextManager,
     session: Option<Arc<SessionStore>>,
-    max_rounds: usize,
+    round_limit: Option<usize>,
 }
 
 impl LoopEngine {
@@ -107,7 +116,9 @@ impl LoopEngine {
             tools,
             context,
             session: Some(session),
-            max_rounds: DEFAULT_MAX_ROUNDS,
+            // 主任务不使用固定轮次硬上限。复杂任务依靠进度检查点继续运行，
+            // 真正的失控则由重复调用与连续失败熔断器识别。
+            round_limit: None,
         }
     }
 
@@ -122,7 +133,7 @@ impl LoopEngine {
             tools,
             context,
             session: None,
-            max_rounds,
+            round_limit: Some(max_rounds),
         }
     }
 
@@ -132,7 +143,7 @@ impl LoopEngine {
             tools: self.tools.clone(),
             context: self.context.clone(),
             session: Some(session),
-            max_rounds: self.max_rounds,
+            round_limit: self.round_limit,
         }
     }
 
@@ -170,17 +181,42 @@ impl LoopEngine {
         let mut transient_messages = Vec::new();
         let mut repeat_detector = RepeatDetector::default();
         let mut repetition_reminder = false;
+        let mut consecutive_tool_failures = 0usize;
 
-        for round in 1..=self.max_rounds {
-            debug!(round, "开始 ReAct 轮次");
+        let mut round = 0usize;
+        loop {
+            round = round.saturating_add(1);
+            if self
+                .round_limit
+                .is_some_and(|round_limit| round > round_limit)
+            {
+                bail!(
+                    "ReAct 循环达到最大轮次 {}，已停止",
+                    self.round_limit.expect("已检查 round_limit 存在")
+                );
+            }
+            let progress_checkpoint = self.round_limit.is_none()
+                && round > 1
+                && (round - 1).is_multiple_of(DEFAULT_PROGRESS_CHECKPOINT_ROUNDS);
+            info!(
+                round,
+                round_limit = ?self.round_limit,
+                progress_checkpoint,
+                history_messages = history.len(),
+                "开始 ReAct 轮次"
+            );
             let mut request_messages = self.context.prepare(history, &specs).await?;
             request_messages.extend(transient_messages.clone());
+            if progress_checkpoint {
+                info!(round, "长任务越过进度检查点，将继续执行");
+                request_messages.push(Message::text(Role::System, PROGRESS_CHECKPOINT_REMINDER));
+            }
             if repetition_reminder {
                 request_messages.push(Message::text(Role::System, REPETITION_REMINDER));
                 repetition_reminder = false;
             }
             let response = self
-                .request_model(&request_messages, &specs, &events, &cancellation)
+                .request_model(&request_messages, &specs, &events, &cancellation, round)
                 .await?;
             match response {
                 Response::Text(text) => {
@@ -195,7 +231,34 @@ impl LoopEngine {
                     return Ok(text);
                 }
                 Response::ToolCalls(calls) => {
+                    if calls.is_empty() {
+                        consecutive_tool_failures = consecutive_tool_failures.saturating_add(1);
+                        let error = "模型返回了空工具调用列表";
+                        self.record(
+                            history,
+                            Message::text(
+                                Role::System,
+                                format!(
+                                    "[empty_tool_calls] {error}；请直接回答或生成有效工具调用。"
+                                ),
+                            ),
+                        )
+                        .await?;
+                        warn!(
+                            round,
+                            consecutive_tool_failures,
+                            threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
+                            "模型返回空工具调用列表"
+                        );
+                        if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                            bail!(
+                                "连续 {consecutive_tool_failures} 次收到空工具调用，已停止无效重试"
+                            );
+                        }
+                        continue;
+                    }
                     if let Err(error) = self.tools.admit_all(&calls) {
+                        consecutive_tool_failures = consecutive_tool_failures.saturating_add(1);
                         self.record(
                             history,
                             Message::text(
@@ -208,25 +271,71 @@ impl LoopEngine {
                             ),
                         )
                         .await?;
+                        warn!(
+                            round,
+                            consecutive_tool_failures,
+                            threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
+                            "工具调用准入失败"
+                        );
+                        if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                            bail!(
+                                "连续 {consecutive_tool_failures} 次工具调用无效，已停止自动重试。最近错误：{error}"
+                            );
+                        }
                         continue;
                     }
                     self.record(history, Message::assistant_tool_calls(calls.clone()))
                         .await?;
-                    let execute = self.execute_in_waves(&calls, events.clone(), &cancellation);
+                    let execute =
+                        self.execute_in_waves(&calls, events.clone(), &cancellation, round);
                     tokio::pin!(execute);
                     let results = tokio::select! {
                         results = &mut execute => results,
                         _ = cancellation.cancelled() => bail!("请求已取消"),
                     };
+                    let round_failures = results.iter().filter(|result| result.failed).count();
+                    let last_error = results
+                        .iter()
+                        .rev()
+                        .find_map(|result| result.error.as_deref())
+                        .map(str::to_owned);
+                    let mut fingerprints = Vec::with_capacity(results.len());
                     for result in results {
                         self.record(history, result.message).await?;
                         transient_messages.extend(result.transient_messages);
-                        if repeat_detector.observe(result.fingerprint) {
-                            repetition_reminder = true;
+                        fingerprints.push(result.fingerprint);
+                    }
+                    let repeat_count = repeat_detector.observe(fingerprints);
+                    if repeat_count == REPETITION_THRESHOLD {
+                        repetition_reminder = true;
+                    }
+                    if repeat_count >= REPETITION_ABORT_THRESHOLD {
+                        bail!(
+                            "检测到同一组工具调用及结果连续重复 {repeat_count} 轮，判定为无进展循环，已停止；这不是任务轮次上限"
+                        );
+                    }
+                    if round_failures == 0 {
+                        consecutive_tool_failures = 0;
+                    } else {
+                        consecutive_tool_failures =
+                            consecutive_tool_failures.saturating_add(round_failures);
+                        warn!(
+                            round,
+                            round_failures,
+                            consecutive_tool_failures,
+                            threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
+                            "工具执行失败"
+                        );
+                        if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                            let detail = last_error.unwrap_or_else(|| "未提供错误详情".to_owned());
+                            bail!(
+                                "连续 {consecutive_tool_failures} 次工具执行失败，已停止自动重试。最近错误：{detail}"
+                            );
                         }
                     }
                 }
                 Response::ToolAssemblyFailed(error) => {
+                    consecutive_tool_failures = consecutive_tool_failures.saturating_add(1);
                     warn!(code = %error.code, message = %error.message, "工具调用装配失败，整轮拒绝");
                     self.record(
                         history,
@@ -239,11 +348,21 @@ impl LoopEngine {
                         ),
                     )
                     .await?;
+                    warn!(
+                        round,
+                        consecutive_tool_failures,
+                        threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
+                        "工具调用装配失败"
+                    );
+                    if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                        bail!(
+                            "连续 {consecutive_tool_failures} 次工具调用装配失败，已停止自动重试。最近错误：{}",
+                            error.message
+                        );
+                    }
                 }
             }
         }
-
-        bail!("ReAct 循环达到最大轮次 {}，已停止", self.max_rounds)
     }
 
     async fn request_model(
@@ -252,6 +371,7 @@ impl LoopEngine {
         specs: &[crate::provider::ToolSpec],
         events: &Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
+        round: usize,
     ) -> Result<Response> {
         let request_messages;
         let messages = if self.provider.capabilities().images {
@@ -261,12 +381,29 @@ impl LoopEngine {
             &request_messages
         };
         let (provider_events, mut provider_rx) = mpsc::unbounded_channel();
+        info!(
+            round,
+            provider = %self.provider.api_type(),
+            message_count = messages.len(),
+            tool_spec_count = specs.len(),
+            "开始请求模型"
+        );
         let request = self.provider.chat_stream(messages, specs, provider_events);
         tokio::pin!(request);
         let mut assembler = ToolCallAssembler::default();
+        let started_at = Instant::now();
+        let mut first_delta_ms = None;
         loop {
             tokio::select! {
                 response = &mut request => {
+                    let success = response.is_ok();
+                    info!(
+                        round,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        first_delta_ms,
+                        success,
+                        "模型响应完成"
+                    );
                     response?;
                     break;
                 },
@@ -274,6 +411,10 @@ impl LoopEngine {
                     if let Some(event) = event
                         && let Some(delta) = assembler.accept(event)
                     {
+                        if first_delta_ms.is_none() {
+                            first_delta_ms = Some(started_at.elapsed().as_millis() as u64);
+                            info!(round, first_delta_ms, "收到模型首个流式增量");
+                        }
                         emit(events, AgentEvent::TextDelta(delta));
                     }
                 }
@@ -285,7 +426,46 @@ impl LoopEngine {
                 emit(events, AgentEvent::TextDelta(delta));
             }
         }
-        Ok(assembler.finish())
+        let response = assembler.finish();
+        match &response {
+            Response::Text(text) => info!(
+                round,
+                response_kind = "text",
+                text_chars = text.chars().count(),
+                "模型响应已装配"
+            ),
+            Response::ToolCalls(calls) => {
+                let tool_names = calls
+                    .iter()
+                    .map(|call| call.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                info!(
+                    round,
+                    response_kind = "tool_calls",
+                    tool_call_count = calls.len(),
+                    tool_names,
+                    "模型响应已装配"
+                );
+                for call in calls {
+                    debug!(
+                        round,
+                        tool_call_id = %call.id,
+                        tool = %call.name,
+                        arguments = %call.arguments,
+                        "模型生成工具调用"
+                    );
+                }
+            }
+            Response::ToolAssemblyFailed(error) => warn!(
+                round,
+                response_kind = "tool_assembly_failed",
+                code = %error.code,
+                message = %error.message,
+                "模型响应装配失败"
+            ),
+        }
+        Ok(response)
     }
 
     async fn record(&self, history: &mut Vec<Message>, message: Message) -> Result<()> {
@@ -301,6 +481,7 @@ impl LoopEngine {
         calls: &[ToolCall],
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
+        round: usize,
     ) -> Vec<ToolExecution> {
         let mut results = Vec::with_capacity(calls.len());
         let mut cursor = 0;
@@ -313,7 +494,7 @@ impl LoopEngine {
                 let batch = stream::iter(calls[cursor..end].to_vec())
                     .map(|call: ToolCall| {
                         let events = events.clone();
-                        async move { self.execute_one(&call, events, cancellation).await }
+                        async move { self.execute_one(&call, events, cancellation, round).await }
                     })
                     .buffered(8)
                     .collect::<Vec<ToolExecution>>()
@@ -322,7 +503,7 @@ impl LoopEngine {
                 cursor = end;
             } else {
                 results.push(
-                    self.execute_one(&calls[cursor], events.clone(), cancellation)
+                    self.execute_one(&calls[cursor], events.clone(), cancellation, round)
                         .await,
                 );
                 cursor += 1;
@@ -336,23 +517,38 @@ impl LoopEngine {
         call: &ToolCall,
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
+        round: usize,
     ) -> ToolExecution {
+        let started_at = Instant::now();
+        debug!(
+            tool_call_id = %call.id,
+            tool = %call.name,
+            round,
+            arguments = %call.arguments,
+            "准备执行工具"
+        );
         emit(
             &events,
             AgentEvent::ToolStarted {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
+                round,
             },
         );
-        let result = match self
+        let (result, failed, error_message) = match self
             .tools
             .execute_with_cancellation(&call.name, call.arguments.clone(), cancellation)
             .await
         {
-            Ok(output) => output,
+            Ok(output) => (output, false, None),
             Err(error) => {
                 warn!(tool = %call.name, %error, "工具执行失败，将错误回填给模型");
-                ToolOutput::text(format!("工具执行错误: {error:#}"))
+                let error_message = format!("工具执行错误: {error:#}");
+                (
+                    ToolOutput::text(error_message.clone()),
+                    true,
+                    Some(error_message),
+                )
             }
         };
         emit(
@@ -361,7 +557,20 @@ impl LoopEngine {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 output: result.content.clone(),
+                round,
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                success: !failed,
+                error: error_message.clone(),
             },
+        );
+        info!(
+            tool_call_id = %call.id,
+            tool = %call.name,
+            round,
+            duration_ms = started_at.elapsed().as_millis() as u64,
+            success = !failed,
+            output_bytes = result.content.len(),
+            "工具执行完成"
         );
         let fingerprint = ToolFingerprint {
             tool_name: call.name.clone(),
@@ -372,6 +581,8 @@ impl LoopEngine {
             message: Message::tool_result(call, result.content),
             transient_messages: result.transient_messages,
             fingerprint,
+            failed,
+            error: error_message,
         }
     }
 }
@@ -407,6 +618,8 @@ struct ToolExecution {
     message: Message,
     transient_messages: Vec<Message>,
     fingerprint: ToolFingerprint,
+    failed: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -418,19 +631,19 @@ struct ToolFingerprint {
 
 #[derive(Default)]
 struct RepeatDetector {
-    last: Option<ToolFingerprint>,
+    last: Option<Vec<ToolFingerprint>>,
     count: usize,
 }
 
 impl RepeatDetector {
-    fn observe(&mut self, fingerprint: ToolFingerprint) -> bool {
-        if self.last.as_ref() == Some(&fingerprint) {
+    fn observe(&mut self, fingerprints: Vec<ToolFingerprint>) -> usize {
+        if self.last.as_ref() == Some(&fingerprints) {
             self.count = self.count.saturating_add(1);
         } else {
-            self.last = Some(fingerprint);
+            self.last = Some(fingerprints);
             self.count = 1;
         }
-        self.count == REPETITION_THRESHOLD
+        self.count
     }
 }
 
@@ -479,6 +692,27 @@ mod tests {
     }
 
     struct PendingProvider;
+
+    struct FailingTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for FailingTool {
+        fn name(&self) -> &str {
+            "failing_tool"
+        }
+
+        fn description(&self) -> &str {
+            "总是失败的测试工具"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<String> {
+            anyhow::bail!("测试工具故意失败")
+        }
+    }
 
     fn test_context(provider: Arc<dyn Provider>) -> ContextManager {
         ContextManager::new(
@@ -630,6 +864,33 @@ mod tests {
             .unwrap();
         assert_eq!(tool_result.content.as_deref(), Some("这是 README 内容"));
         let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[tokio::test]
+    async fn stops_after_consecutive_tool_failures() {
+        let call = || ToolCall {
+            id: "call-fail".to_owned(),
+            name: "failing_tool".to_owned(),
+            arguments: json!({}),
+        };
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from([
+                Response::ToolCalls(vec![call()]),
+                Response::ToolCalls(vec![call()]),
+                Response::ToolCalls(vec![call()]),
+            ])),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register(FailingTool);
+        let engine = LoopEngine::ephemeral(provider.clone(), registry, test_context(provider), 10);
+
+        let error = engine
+            .run_turn(&mut Vec::new(), "执行失败工具".to_owned())
+            .await
+            .expect_err("连续工具失败应触发熔断");
+
+        assert!(error.to_string().contains("连续 3 次工具执行失败"));
     }
 
     #[tokio::test]
@@ -937,6 +1198,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stops_a_genuine_identical_no_progress_loop() {
+        let call = || ToolCall {
+            id: "call-repeat".to_owned(),
+            name: "repeat_probe".to_owned(),
+            arguments: json!({"value": "same"}),
+        };
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from(
+                (0..REPETITION_ABORT_THRESHOLD)
+                    .map(|_| Response::ToolCalls(vec![call()]))
+                    .collect::<Vec<_>>(),
+            )),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(RepeatingTool {
+            executions: executions.clone(),
+        });
+        let engine = LoopEngine::new(
+            provider.clone(),
+            registry,
+            test_context(provider),
+            test_session("repeat-abort"),
+        );
+
+        let error = engine
+            .run_turn(&mut Vec::new(), "触发无进展循环".to_owned())
+            .await
+            .expect_err("完全相同的调用和结果不应无限循环");
+
+        assert!(error.to_string().contains("无进展循环"));
+        assert!(!error.to_string().contains("最大轮次"));
+        assert_eq!(
+            executions.load(std::sync::atomic::Ordering::SeqCst),
+            REPETITION_ABORT_THRESHOLD
+        );
+    }
+
     struct InvalidArgumentsStream {
         requests: std::sync::atomic::AtomicUsize,
     }
@@ -1005,6 +1306,56 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok("executed".to_owned())
         }
+    }
+
+    #[tokio::test]
+    async fn main_turn_continues_past_fifty_rounds_and_completes() {
+        let mut responses = (0..=DEFAULT_PROGRESS_CHECKPOINT_ROUNDS)
+            .map(|index| {
+                Response::ToolCalls(vec![ToolCall {
+                    id: format!("long-call-{index}"),
+                    name: "side_effect".to_owned(),
+                    arguments: json!({"value": index.to_string()}),
+                }])
+            })
+            .collect::<Vec<_>>();
+        responses.push(Response::Text("长任务完成".to_owned()));
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from(responses)),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(SideEffectProbe {
+            name: "side_effect",
+            executions: executions.clone(),
+        });
+        let engine = LoopEngine::new(
+            provider.clone(),
+            registry,
+            test_context(provider.clone()),
+            test_session("past-fifty"),
+        );
+
+        let answer = engine
+            .run_turn(&mut Vec::new(), "执行超过五十轮的长任务".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "长任务完成");
+        assert_eq!(
+            executions.load(std::sync::atomic::Ordering::SeqCst),
+            DEFAULT_PROGRESS_CHECKPOINT_ROUNDS + 1
+        );
+        let snapshots = provider.snapshots.lock().unwrap();
+        assert!(
+            snapshots[DEFAULT_PROGRESS_CHECKPOINT_ROUNDS]
+                .iter()
+                .any(|message| {
+                    message.role == Role::System
+                        && message.content.as_deref() == Some(PROGRESS_CHECKPOINT_REMINDER)
+                })
+        );
     }
 
     #[tokio::test]

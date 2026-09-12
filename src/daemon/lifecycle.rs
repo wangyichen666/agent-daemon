@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::process::Command;
 
@@ -33,6 +34,8 @@ struct ReadyMarker {
     pid: u32,
     workspace: PathBuf,
     version: String,
+    #[serde(default)]
+    executable_fingerprint: Option<String>,
 }
 
 impl RuntimePaths {
@@ -47,7 +50,9 @@ impl RuntimePaths {
             socket: directory.join("daemon.sock"),
             pid: directory.join("daemon.pid"),
             ready: directory.join("ready.json"),
-            log: directory.join("daemon.log"),
+            // socket/PID 属于临时运行态；日志必须留在工作区，daemon 退出或系统
+            // 清理临时目录后仍可按 session/request 追溯。
+            log: workspace.join(".my-agent/daemon.log"),
             startup_lock: directory.join("startup.lock"),
             directory,
         })
@@ -69,6 +74,13 @@ impl RuntimePaths {
         tokio::fs::create_dir_all(&self.directory)
             .await
             .with_context(|| format!("创建运行目录失败: {}", self.directory.display()))?;
+        if let Some(log_directory) = self.log.parent() {
+            tokio::fs::create_dir_all(log_directory)
+                .await
+                .with_context(|| {
+                    format!("创建 daemon 日志目录失败: {}", log_directory.display())
+                })?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -87,6 +99,7 @@ impl RuntimePaths {
             pid: std::process::id(),
             workspace: workspace.to_path_buf(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            executable_fingerprint: Some(current_executable_fingerprint().await?),
         };
         let bytes = serde_json::to_vec_pretty(&marker).context("序列化 ready 标记失败")?;
         tokio::fs::write(&self.ready, bytes)
@@ -128,7 +141,25 @@ impl RuntimePaths {
     pub async fn ensure_daemon(&self, workspace: &Path) -> Result<()> {
         self.prepare().await?;
         if matches!(self.status().await, DaemonStatus::Ready { .. }) {
-            return Ok(());
+            if self.ready_marker_matches_current_executable().await {
+                return Ok(());
+            }
+            tracing::info!(
+                socket = %self.socket.display(),
+                "检测到 daemon 来自旧二进制，正在优雅重启"
+            );
+            if let Err(error) = self.request_graceful_shutdown().await {
+                tracing::warn!(%error, "请求旧 daemon 优雅停止失败，将继续检查运行状态");
+            }
+            for _ in 0..50 {
+                if !matches!(self.status().await, DaemonStatus::Ready { .. }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if matches!(self.status().await, DaemonStatus::Ready { .. }) {
+                bail!("旧版本 daemon 正在完成活动任务，暂时无法切换；请稍后重试");
+            }
         }
         if matches!(self.status().await, DaemonStatus::Stale { .. }) {
             self.cleanup().await;
@@ -190,6 +221,31 @@ impl RuntimePaths {
         command.spawn().context("拉起 daemon 失败")?;
         Ok(())
     }
+
+    async fn ready_marker_matches_current_executable(&self) -> bool {
+        let Ok(bytes) = tokio::fs::read(&self.ready).await else {
+            return false;
+        };
+        let Ok(marker) = serde_json::from_slice::<ReadyMarker>(&bytes) else {
+            return false;
+        };
+        let Ok(current) = current_executable_fingerprint().await else {
+            return false;
+        };
+        marker.version == env!("CARGO_PKG_VERSION")
+            && marker.executable_fingerprint.as_deref() == Some(current.as_str())
+    }
+
+    async fn request_graceful_shutdown(&self) -> Result<()> {
+        let mut stream = UnixStream::connect(&self.socket)
+            .await
+            .with_context(|| format!("连接旧 daemon 失败: {}", self.socket.display()))?;
+        stream
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"upgrade\",\"method\":\"daemon.stop\",\"params\":{}}\n")
+            .await
+            .context("发送 daemon 升级停止请求失败")?;
+        stream.flush().await.context("刷新 daemon 升级停止请求失败")
+    }
 }
 
 struct StartupGuard {
@@ -230,6 +286,19 @@ async fn startup_lock_is_stale(path: &Path) -> bool {
         .is_some_and(|age| age >= Duration::from_secs(10))
 }
 
+async fn current_executable_fingerprint() -> Result<String> {
+    let executable = env::current_exe().context("定位当前 my-agent 可执行文件失败")?;
+    let bytes = tokio::fs::read(&executable)
+        .await
+        .with_context(|| format!("读取当前 my-agent 可执行文件失败: {}", executable.display()))?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in &bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Ok(format!("{:016x}-{}", hash, bytes.len()))
+}
+
 fn stable_workspace_hash(workspace: &Path) -> u64 {
     struct FnvHasher(u64);
 
@@ -264,6 +333,7 @@ mod tests {
         assert_eq!(first.socket, second.socket);
         assert!(first.socket.ends_with("daemon.sock"));
         assert!(first.directory.starts_with(std::env::temp_dir()));
+        assert_eq!(first.log, current.join(".my-agent/daemon.log"));
     }
 
     #[test]
@@ -274,5 +344,32 @@ mod tests {
             stable_workspace_hash(path),
             stable_workspace_hash(Path::new("/tmp/other"))
         );
+    }
+
+    #[tokio::test]
+    async fn ready_marker_fingerprint_distinguishes_legacy_daemons() {
+        let directory =
+            std::env::temp_dir().join(format!("my-agent-ready-marker-{}", std::process::id()));
+        let paths = RuntimePaths::for_test(directory);
+        paths.prepare().await.unwrap();
+        tokio::fs::write(
+            &paths.ready,
+            serde_json::to_vec(&serde_json::json!({
+                "pid": std::process::id(),
+                "workspace": std::env::current_dir().unwrap(),
+                "version": env!("CARGO_PKG_VERSION")
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(!paths.ready_marker_matches_current_executable().await);
+
+        paths
+            .mark_ready(&std::env::current_dir().unwrap())
+            .await
+            .unwrap();
+        assert!(paths.ready_marker_matches_current_executable().await);
+        paths.cleanup().await;
     }
 }

@@ -10,7 +10,7 @@ use crate::provider::{Message, Provider, Response, Role, ToolSpec};
 use crate::skills::SkillLibrary;
 use crate::tool_calls::collect_provider_response;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "你是一个个人 AI 编码 Agent。先理解任务，再按需调用工具；工具失败时根据错误调整方案；任务完成后给出简洁、可核验的最终回答。面对需要三个或更多步骤的复杂任务，先调用 plan 的 set 制定计划，开始和完成每一步时用 update 更新状态，必要时用 add 调整；简单单步任务不要使用 plan，避免形式主义。若动态上下文提供了命中的技能正文，应把它作为当前任务的工作方法；未命中的技能只有索引，不要假装已读取其正文。";
+const DEFAULT_SYSTEM_PROMPT: &str = "你是一个个人 AI 编码 Agent。先理解任务，再按需调用工具；工具失败时根据错误调整方案，先修正根因再重试，不要在同一失败上无变化地循环；任务完成后给出简洁、可核验的最终回答。面对“给我写一个前端”这类未指定技术栈的请求，优先沿用当前项目已有技术栈；没有现有栈时默认创建可直接打开的原生 HTML/CSS/JavaScript 页面，并明确说明这个假设。开始写入嵌套路径前确保父目录存在，优先使用工具提供的目录创建能力；如果工具报告路径不存在，立即创建目录并重试一次。面对需要三个或更多步骤的复杂任务，先调用 plan 的 set 制定计划，开始和完成每一步时用 update 更新状态，必要时用 add 调整；简单单步任务不要使用 plan，避免形式主义。若动态上下文提供了命中的技能正文，应把它作为当前任务的工作方法；未命中的技能只有索引，不要假装已读取其正文。";
 const DEFAULT_TOKEN_BUDGET: usize = 32_000;
 const DEFAULT_RECENT_MESSAGES: usize = 12;
 const MAX_PROJECT_RULE_BYTES: usize = 64 * 1024;

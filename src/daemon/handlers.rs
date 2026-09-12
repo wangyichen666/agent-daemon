@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
+use tracing::{Instrument, info, info_span};
 
 use super::protocol::{EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, ServerFrame};
 use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
@@ -171,6 +173,12 @@ impl DaemonState {
             }
         };
         let session_id = session.id.clone();
+        let started_at = Instant::now();
+        info!(
+            session_id = %session_id,
+            request_id = ?request.id,
+            "chat 请求开始"
+        );
         let active_key = ActiveKey {
             session_id: session_id.clone(),
             request_id: request.id.clone(),
@@ -191,23 +199,31 @@ impl DaemonState {
 
         let (agent_events, mut event_receiver) = mpsc::unbounded_channel();
         let (approval_events, mut approval_receiver) = mpsc::unbounded_channel();
-        let run = self.approvals.with_session_context(
-            session_id.clone(),
-            request.id.clone(),
-            approval_events,
-            async {
-                let mut history = session.history.lock().await;
-                session
-                    .engine
-                    .run_turn_with_events(
-                        &mut history,
-                        params.message,
-                        Some(agent_events),
-                        cancellation,
-                    )
-                    .await
-            },
+        let turn_span = info_span!(
+            "agent_turn",
+            session_id = %session_id,
+            request_id = ?request.id,
         );
+        let run = self
+            .approvals
+            .with_session_context(
+                session_id.clone(),
+                request.id.clone(),
+                approval_events,
+                async {
+                    let mut history = session.history.lock().await;
+                    session
+                        .engine
+                        .run_turn_with_events(
+                            &mut history,
+                            params.message,
+                            Some(agent_events),
+                            cancellation,
+                        )
+                        .await
+                },
+            )
+            .instrument(turn_span);
         tokio::pin!(run);
 
         let result = loop {
@@ -259,6 +275,24 @@ impl DaemonState {
             }
             Err(error) => Err((INTERNAL_ERROR, format!("{error:#}"))),
         };
+        match &response {
+            Ok(_) => info!(
+                session_id = %session_id,
+                request_id = ?active_key.request_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                outcome = "completed",
+                "chat 请求结束"
+            ),
+            Err((code, error)) => info!(
+                session_id = %session_id,
+                request_id = ?active_key.request_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                outcome = "failed",
+                error_code = *code,
+                error,
+                "chat 请求结束"
+            ),
+        }
         self.publish_update(
             &frames,
             &active_key,
@@ -962,17 +996,33 @@ fn agent_event_update(event: AgentEvent) -> ActiveRequestUpdate {
     let (kind, data) = match event {
         AgentEvent::TurnStarted => (EventKind::TurnStarted, json!({})),
         AgentEvent::TextDelta(delta) => (EventKind::TextDelta, json!({"delta": delta})),
-        AgentEvent::ToolStarted { call_id, name } => (
+        AgentEvent::ToolStarted {
+            call_id,
+            name,
+            round,
+        } => (
             EventKind::ToolStarted,
-            json!({"tool_call_id": call_id, "name": name}),
+            json!({"tool_call_id": call_id, "name": name, "round": round}),
         ),
         AgentEvent::ToolFinished {
             call_id,
             name,
             output,
+            round,
+            duration_ms,
+            success,
+            error,
         } => (
             EventKind::ToolFinished,
-            json!({"tool_call_id": call_id, "name": name, "output": output}),
+            json!({
+                "tool_call_id": call_id,
+                "name": name,
+                "output": output,
+                "round": round,
+                "duration_ms": duration_ms,
+                "success": success,
+                "error": error,
+            }),
         ),
         AgentEvent::TurnCompleted { content } => {
             (EventKind::TurnCompleted, json!({"content": content}))

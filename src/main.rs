@@ -25,11 +25,12 @@ use clap::{Parser, Subcommand};
 use daemon::lifecycle::{DaemonStatus, RuntimePaths};
 use daemon::runtime::build_daemon_state;
 use daemon::server::run_unix_server;
-use entry::cli::{print_sessions, request_result, run_chat, run_repl};
+use entry::cli::{print_session_list, print_sessions, request_result, run_chat, run_repl};
 use entry::editor::run_acp_server;
 use entry::serve::run_http_server;
 use entry::tui::run_tui;
 use serde_json::json;
+use session::SessionStore;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -69,6 +70,15 @@ enum Command {
     Stop,
     #[command(about = "列出当前工作区会话")]
     Sessions,
+    #[command(about = "查看当前工作区 daemon 日志")]
+    Logs {
+        #[arg(long, default_value_t = 100, help = "显示最近多少行")]
+        lines: usize,
+        #[arg(long, help = "只显示指定 session_id 的日志")]
+        session: Option<String>,
+        #[arg(long, help = "只显示指定 request id 的日志，例如 2 或 task-1")]
+        request: Option<String>,
+    },
     #[command(subcommand, about = "配置诊断")]
     Config(ConfigCommand),
 }
@@ -94,6 +104,11 @@ async fn main() -> Result<()> {
         Command::Status => run_status_command(&workspace).await,
         Command::Stop => run_stop_command(&workspace).await,
         Command::Sessions => run_sessions_command(&workspace).await,
+        Command::Logs {
+            lines,
+            session,
+            request,
+        } => run_logs_command(&workspace, lines, session.as_deref(), request.as_deref()).await,
         Command::Config(ConfigCommand::Check) => run_config_check(),
     }
 }
@@ -157,13 +172,25 @@ async fn run_status_command(workspace: &Path) -> Result<()> {
     let paths = RuntimePaths::for_workspace(workspace)?;
     match paths.status().await {
         DaemonStatus::Ready { pid } => {
-            println!("ready · pid={pid} · socket={}", paths.socket.display())
+            println!(
+                "ready · pid={pid} · socket={} · log={} · sessions={}",
+                paths.socket.display(),
+                paths.log.display(),
+                workspace.join(".my-agent").display()
+            )
         }
-        DaemonStatus::Starting { pid } => println!("starting · pid={pid:?}"),
+        DaemonStatus::Starting { pid } => println!(
+            "starting · pid={pid:?} · log={} · sessions={}",
+            paths.log.display(),
+            workspace.join(".my-agent").display()
+        ),
         DaemonStatus::Stale { pid } => {
-            println!("stale · pid={pid:?} · 可再次运行 `my-agent` 自动清理并重启")
+            println!(
+                "stale · pid={pid:?} · log={} · 可再次运行 `my-agent` 自动清理并重启",
+                paths.log.display()
+            )
         }
-        DaemonStatus::Stopped => println!("stopped"),
+        DaemonStatus::Stopped => println!("stopped · log={}", paths.log.display()),
     }
     Ok(())
 }
@@ -189,11 +216,64 @@ async fn run_stop_command(workspace: &Path) -> Result<()> {
 }
 
 async fn run_sessions_command(workspace: &Path) -> Result<()> {
-    config::validate_environment()?;
     let paths = RuntimePaths::for_workspace(workspace)?;
-    paths.ensure_daemon(workspace).await?;
-    let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-    print_sessions(&client).await
+    if matches!(paths.status().await, DaemonStatus::Ready { .. }) {
+        let client = client::DaemonClient::connect_unix(&paths.socket).await?;
+        return print_sessions(&client).await;
+    }
+    let store = SessionStore::from_env(workspace);
+    let sessions = store
+        .list_sessions()
+        .await
+        .context("读取本地会话清单失败")?;
+    println!("daemon 未运行，以下为本地会话快照：");
+    print_session_list(&sessions);
+    Ok(())
+}
+
+async fn run_logs_command(
+    workspace: &Path,
+    lines: usize,
+    session: Option<&str>,
+    request: Option<&str>,
+) -> Result<()> {
+    if lines == 0 {
+        anyhow::bail!("--lines 必须大于 0");
+    }
+    let paths = RuntimePaths::for_workspace(workspace)?;
+    let content = match tokio::fs::read_to_string(&paths.log).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("暂无 daemon 日志：{}", paths.log.display());
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 daemon 日志失败: {}", paths.log.display()));
+        }
+    };
+    let recent = content
+        .lines()
+        .filter(|line| {
+            session.is_none_or(|session| line.contains(&format!("session_id={session}")))
+                && request.is_none_or(|request| log_line_matches_request(line, request))
+        })
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>();
+    for line in recent.into_iter().rev() {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn log_line_matches_request(line: &str, request: &str) -> bool {
+    if request.starts_with("Number(") || request.starts_with("String(") {
+        return line.contains(&format!("request_id={request}"));
+    }
+    line.contains(&format!("request_id=Number({request})"))
+        || line.contains(&format!("request_id=String(\"{request}\")"))
+        || line.contains(&format!("request_id={request}"))
 }
 
 fn run_config_check() -> Result<()> {
@@ -214,9 +294,25 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod main_tests {
+    use super::log_line_matches_request;
+
+    #[test]
+    fn filters_numeric_and_string_request_ids_without_partial_matches() {
+        let numeric = "agent_turn{request_id=Number(2)}: 开始 ReAct 轮次";
+        let string = "agent_turn{request_id=String(\"task-2\")}: 开始 ReAct 轮次";
+
+        assert!(log_line_matches_request(numeric, "2"));
+        assert!(log_line_matches_request(numeric, "Number(2)"));
+        assert!(log_line_matches_request(string, "task-2"));
+        assert!(!log_line_matches_request(numeric, "1"));
+    }
 }

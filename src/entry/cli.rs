@@ -120,11 +120,22 @@ pub async fn run_chat(client: &DaemonClient, input: &str, session_id: &str) -> R
                 }
                 EventKind::ToolStarted => {
                     let name = event.data["name"].as_str().unwrap_or("unknown");
-                    eprintln!("\n[工具开始] {name}");
+                    let round = event.data["round"].as_u64().unwrap_or_default();
+                    eprintln!("\n[第 {round} 轮·工具开始] {name}");
                 }
                 EventKind::ToolFinished => {
                     let name = event.data["name"].as_str().unwrap_or("unknown");
-                    eprintln!("[工具完成] {name}");
+                    let duration_ms = event.data["duration_ms"].as_u64().unwrap_or_default();
+                    let success = event.data["success"].as_bool().unwrap_or(true);
+                    if success {
+                        eprintln!("[工具完成] {name} · {duration_ms}ms");
+                    } else {
+                        let error = event.data["error"]
+                            .as_str()
+                            .or_else(|| event.data["output"].as_str())
+                            .unwrap_or("未知错误");
+                        eprintln!("[工具失败] {name} · {duration_ms}ms · {error}");
+                    }
                 }
                 EventKind::ApprovalRequired => {
                     respond_to_approval(client, &event.data).await?;
@@ -147,6 +158,7 @@ pub async fn run_chat(client: &DaemonClient, input: &str, session_id: &str) -> R
                 {
                     println!("{content}");
                 }
+                eprintln!("[任务完成] request_id={request_id:?}");
                 return Ok(());
             }
         }
@@ -164,7 +176,7 @@ pub async fn print_sessions(client: &DaemonClient) -> Result<()> {
     Ok(())
 }
 
-fn print_session_list(sessions: &[crate::session::SessionInfo]) {
+pub fn print_session_list(sessions: &[crate::session::SessionInfo]) {
     if sessions.is_empty() {
         println!("暂无会话记录。");
         return;
@@ -325,15 +337,24 @@ async fn consume_recovered_stream(
                 }
                 EventKind::ToolStarted => {
                     eprintln!(
-                        "\n[恢复工具开始] {}",
+                        "\n[恢复·第 {} 轮·工具开始] {}",
+                        event.data["round"].as_u64().unwrap_or_default(),
                         event.data["name"].as_str().unwrap_or("unknown")
                     );
                 }
                 EventKind::ToolFinished => {
-                    eprintln!(
-                        "[恢复工具完成] {}",
-                        event.data["name"].as_str().unwrap_or("unknown")
-                    );
+                    let name = event.data["name"].as_str().unwrap_or("unknown");
+                    let duration_ms = event.data["duration_ms"].as_u64().unwrap_or_default();
+                    let success = event.data["success"].as_bool().unwrap_or(true);
+                    if success {
+                        eprintln!("[恢复工具完成] {name} · {duration_ms}ms");
+                    } else {
+                        let error = event.data["error"]
+                            .as_str()
+                            .or_else(|| event.data["output"].as_str())
+                            .unwrap_or("未知错误");
+                        eprintln!("[恢复工具失败] {name} · {duration_ms}ms · {error}");
+                    }
                 }
                 EventKind::ApprovalRequired => {
                     let approval = event

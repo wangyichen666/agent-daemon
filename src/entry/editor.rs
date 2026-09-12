@@ -401,12 +401,23 @@ fn forward_event(
         EventKind::ToolFinished => {
             let call_id = event.data["tool_call_id"].as_str().unwrap_or("unknown");
             let output = event.data["output"].as_str().unwrap_or_default();
+            let success = event.data["success"].as_bool().unwrap_or(true);
             Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 call_id.to_owned(),
                 ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
+                    .status(if success {
+                        ToolCallStatus::Completed
+                    } else {
+                        ToolCallStatus::Failed
+                    })
                     .content(vec![output.to_owned().into()])
-                    .raw_output(json!({"output": output})),
+                    .raw_output(json!({
+                        "output": output,
+                        "round": event.data["round"],
+                        "duration_ms": event.data["duration_ms"],
+                        "success": success,
+                        "error": event.data["error"],
+                    })),
             )))
         }
         EventKind::TurnStarted | EventKind::TurnCompleted | EventKind::ApprovalRequired => None,

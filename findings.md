@@ -265,3 +265,94 @@
 - sticky-bottom 体验增加 unread counter：用户滚离底部时新消息会累计，transcript 下方显示“X 条新消息 · 回到底部”；回到底部会清零。现有 Ctrl+End、PgUp/Dn 和 follow_bottom 语义保持不变。
 - 新增 F1/Ctrl+/ 帮助浮层，集中说明发送、多行、历史、滚动、工具、队列、取消和退出操作；Esc 在帮助打开时只关闭帮助，不会误退出。
 - prompt 高度改为随终端高度动态调整，最多占用一半内容区且保留状态/footer；窄终端继续使用最小布局和短提示。
+
+## Agent 不可用诊断：第一轮源码证据（2026-09-09）
+
+- 截图中的直接错误不是 Provider 超时，而是 `write_file` 对多个目标返回 `No such file or directory (os error 2)`；当前 `src/tools/write.rs` 只调用 `tokio::fs::write(&path, content)`，没有在写入前创建父目录。模型选择了 `src/main/resources/static/...`，该目录不存在时每个文件都会失败。
+- `LoopEngine::execute_in_waves` 会把工具错误转成普通 `ToolOutput::text("工具执行错误: ...")` 并折回模型上下文；模型可以继续生成下一轮工具调用。当前最大 ReAct 轮数是 50，单次错误没有立即失败或暂停机制。
+- 重复检测只在“工具名 + 参数哈希 + 结果哈希”完全一致连续三次时发送提醒，不会停止循环；截图中重复的 `plan` 调用很可能参数在变化，或模型在不同调用间反复规划，因此不会触发现有提醒。
+- TUI 能看到工具事件和错误文本，但当前没有 request ID、ReAct round、Provider 首包/总耗时、最后一次模型请求状态、连续失败计数或当前 daemon log 路径；所以用户只能看到“工具执行”，无法判断卡在 Provider、工具、审批还是模型循环。
+- 当前 daemon active 状态只能告诉 session 有活动请求，`session_snapshot` 能列出 active request/审批，但没有按 request 的 round/tool failure 统计；需要结合 `.my-agent/runtime/*/daemon.log`、session JSONL 和新增结构化 telemetry 才能定位长循环。
+
+## Agent 不可用诊断：真实会话证据（2026-09-09）
+
+- 目标工作区 `/Users/pilot/Desktop/test/test01` 的 daemon 当前是 `ready · pid=7513`，session 列表显示该 session 已 `idle`、0 个活动请求、55 条消息；因此这次不是 daemon 仍在执行，而是执行过程中 TUI 缺少及时的中间态/失败熔断反馈。
+- `/var/folders/.../T/my-agent/a2ce7645ea393d41/daemon.log` 只记录了 4 条 `write_file` WARN，全部是目录不存在；默认 `RUST_LOG=warn` 没有 request/round/provider/tool 参数摘要，诊断信息不足。
+- session JSONL 还原出完整链路：模型先并行调用 4 次 `write_file`，全部因 `src/main/resources/static/{css,js}` 父目录不存在失败；随后调用 `exec mkdir -p ...`，再次写入成功，最终执行验证并返回完成文本。也就是说模型最终自我修复了，但用户在失败循环阶段看不到“正在恢复/重试/还剩几轮”的明确状态。
+- 该 session 的 `plan.json` 最终为 3/3 done；`target/classes/static` 也已有四个资源文件，说明产物实际生成。截图截取的是失败批次附近，不是最终终态。
+- 另一个可观测性问题：`myagent sessions` 入口先执行 `config::validate_environment()`，当当前 shell 没有 API 环境变量时会直接报配置错误，无法查看已有 daemon/session 状态；使用 `API_TYPE=ollama MODEL_NAME=qwen3 myagent ... sessions` 才能读到 idle 状态。这会让排障更困难。
+
+## Agent 不可用修复实施勘察（2026-09-09）
+
+- `AgentEvent` 当前只有 turn/text/tool/complete 五类事件；协议层 `EventKind` 也只投影这些事件，适合新增 `RoundStarted`、`Telemetry` 或给 ToolStarted/Finished 增加 round/duration/failed 字段，但要保持旧客户端可反序列化。
+- `LoopEngine::execute_one` 当前把所有工具异常包装为普通 `ToolOutput`，无法让外层区分成功/失败；应在 `ToolExecution` 保留 `failed` 与错误摘要，回合结束时根据连续失败数决定继续还是返回明确失败。
+- `myagent status` 已经不依赖模型配置，但只输出 pid/socket；`RuntimePaths` 已有稳定 `daemon.log` 路径，可以直接展示 log、ready、session 根目录。
+- `sessions` 的 daemon 连接路径本身不需要 provider 配置；应移除环境校验，同时允许已有 daemon 直接查询，daemon 不存在时再给出不依赖模型的启动/状态提示。
+
+## Agent 不可用修复设计（2026-09-09）
+
+- 采用向现有 `ToolStarted/ToolFinished` 事件追加 `round`、`duration_ms`、`success`、`error` 字段的兼容方案，不新增事件种类，避免 ACP/HTTP/旧 TUI 必须处理新枚举分支。
+- `LoopEngine` 按工具执行结果统计连续失败；达到 3 次立即返回明确错误，成功工具会重置计数。写文件自动创建父目录后，正常前端脚手架不会触发该熔断。
+- Provider telemetry 使用 tracing 记录每轮总耗时、首个流式增量耗时与响应类型；默认日志级别从 warn 提升到 info，`status` 输出 daemon.log 路径，新增只读 `logs` 命令便于现场排障。
+- 系统提示补充“模糊前端请求的默认技术栈/目录创建/失败恢复”约束，减少模型把可恢复的文件系统错误当作长循环入口。
+
+## Agent 不可用修复验证（2026-09-09）
+
+- `cargo check --all-targets` 已通过。
+- `cargo test --all-targets` 已通过，当前 111 项全绿；正在补充本轮新增行为的定向回归测试与文档。
+
+## Agent 不可用修复结果（2026-09-09）
+
+- 新增回归后 `cargo test --all-targets` 为 113/113，`cargo clippy --all-targets --all-features -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 均通过。
+- `cargo build --release` 与 `cargo install --path . --force` 通过；`/Users/pilot/.local/bin/myagent`、`my-agent` 均已验证为 0.1.0 最新 release。
+- 真实验证：空模型环境下 `myagent --workspace /Users/pilot/Desktop/test/test01 sessions` 可直接读取本地 session 快照；`status` 和 `logs` 可在 daemon 停止时工作，不再要求 API 环境变量。
+- 用户工作区的旧 daemon 已确认 idle 后停止，避免旧进程继续使用修复前二进制；下一次带有效模型配置运行 `myagent` 会自动拉起新版本。
+
+## TUI 任务完成与工具折叠优化（2026-09-09）
+
+- 原实现 `show_tools=false` 只隐藏工具输出，仍逐条绘制每个工具卡片；截图中的 10+ 条工具行因此占满消息区。现改为连续工具节点默认合并成一行摘要，摘要包含次数、工具名、轮次范围、状态和总耗时。
+- Ctrl+T 现在控制“工具调用与输出详情”整体展开/收起；默认折叠时不再自动展开失败工具输出，避免异常时再次淹没正文。工具结果仍保留在 UI 数据和 session 中。
+- Response 成功/失败会向 transcript 写入 `✓ 任务完成` / `✗ 任务未完成`，并在状态栏显示 request ID；CLI 终态额外打印 `[任务完成] request_id=...`。
+- 新增 TUI 回归：默认摘要不展示工具输出，Ctrl+T 展开后可见；Response 成功后显示任务完成标记。
+
+## Mac 快捷键提示修正（2026-09-09）
+
+- 运行时原本同时支持 F1 与 Ctrl+/，但标题、footer 和帮助优先显示 F1；Mac 用户通常没有独立 F1 键，现已将所有用户可见提示统一为 `Ctrl+/`，F1 兼容处理仍保留。
+# 2026-09-12 TUI 三项问题修复
+
+- 用户已确认开始修复 `docs/known-issues.md` 中的 TUI-001～TUI-003。
+- 仓库当前有多处未提交修改，包括 TUI、daemon、上下文和既有规划文件；本轮必须在这些改动上增量工作。
+- README 描述当前 TUI 已有结构化 transcript、Ctrl+T 全局展开/折叠、活动请求状态与完成标记，因此修复重点应是现有布局与状态投影，而不是新建另一套界面。
+- 附件现象已经文字化保存：短 transcript 被推到底部形成巨幅上方空白；详情模式像替换页面并丢失原 Query；运行时只有数字变化、缺少持续动画反馈。
+- Ctrl+T 当前只翻转全局 `show_tools`；`draw_ui` 随后重算 transcript 行数，而 `follow_bottom=true` 会强制 `scroll=0` 并从新的 `max_scroll` 开始显示。工具输出展开新增大量行后，原 Query 因此被直接顶出视口，形成“换到详情页”的感受。
+- 当前事件循环仅在键盘/鼠标事件或 daemon frame 到达时把 `dirty` 设为 true；16ms poll 超时本身不触发重绘，所以运行状态无法呈现持续的 spinner/不确定进度动画。
+- 工具详情已经按消息序列内联生成，问题不是缺少内联数据结构，而是全局展开后的滚动锚点丢失；优先增加稳定的视口锚点，而不是另建详情页。
+- 当前 TUI 定向基线为 16/16 通过，但现有测试只断言展开内容存在，没有验证“展开前后原 Query 仍位于视口”或滚动锚点，因此未捕获用户截图中的跳屏。
+- 项目使用 `ratatui 0.30.2`；`Terminal::new` 的 viewport 默认行为仍需从 `ratatui-core` 实现核对，排除终端初始化导致首屏从当前光标位置开始的可能性。
+- `ratatui-core 0.1.2` 文档明确说明 Fullscreen viewport 的 `Frame::area` 从 `(0,0)` 覆盖整个 backend；默认 `TerminalOptions` 使用默认 viewport，因此现有大空白并非有意采用 Inline viewport。
+- 当前手工初始化与 Ratatui 官方初始化流程一样先进入 alternate screen，但没有显式 `terminal.clear()`；需继续确认 Terminal 首绘是否保证清屏，以及用户终端是否可能保留主屏内容。
+- Ratatui 的 `Terminal` 实现拆分在 `terminal/init.rs`、`render.rs` 等子模块，前一次只读主模块未看到构造器不是实现缺失；下一步直接核对这些文件。
+- `Terminal::new` 初始化的是两个“空白”缓冲区，首帧只输出相对空缓冲发生变化的单元格；如果某个终端的 alternate screen 没有清除旧内容，未被绘制的空白单元不会主动覆盖旧屏幕。初始化后显式 `terminal.clear()` 能消除这类残留空白/旧主屏内容。
+- 已实现第一版：进入 TUI 后显式清屏；Ctrl+T 保存当前 transcript 顶部行并关闭 follow-bottom 后再展开；新增 ActivityPhase 与 90ms 动画 tick，状态栏显示无百分比的往返式进度条。
+- 第一版修改 `cargo check --all-targets` 通过；仍需新增回归测试验证 query 可见性、首行位置、动画变化与终态停止。
+- 新增 3 项 view 回归：短 transcript 标题/Query 靠近屏幕顶部；80 行工具输出展开后原 Query 和首行详情同时可见且不 follow-bottom；活动状态显示会随 tick 改变的不确定进度条，审批状态改为静态菱形。
+- 完成响应测试补充断言 ActivityPhase 回到 Idle，确保终态不会继续动画。
+- `cargo fmt --all` 后 TUI 定向测试 19/19 通过（原 16 项 + 新增 3 项）。
+- 实现 diff 审查确认修改仅落在 TUI 状态/渲染/初始化和测试；`git diff --check` 通过。
+- 严格 Clippy（all-targets、all-features、`-D warnings`）通过，无新增告警。
+- 全量测试已通过：122/122（包含新增 TUI 回归），无失败或忽略项。
+- 仓库没有保留把 TestBackend JSON 转为 PNG 的脚本，只有旧 `docs/tui-preview.png`；视觉验收优先使用 TestBackend 行位置/内容断言和真实 PTY 启动。
+- `cargo fmt --all -- --check` 与 `cargo build --release` 均通过。
+- 隔离 PTY 启动捕获到 `ESC[2J ESC[1;1H`，证明初始化显式清屏生效；标题绘制在第 2 行、引导内容从第 5 行开始，不再下沉到底部。
+- PTY 中发送 Esc 后正常输出退出 alternate-screen、关闭 bracketed paste 与显示光标序列，进程状态 0 结束，终端恢复链路正常。
+- PTY 测试只在隔离目录生成一个 daemon 日志；测试目录已整体移到 `/Users/pilot/.Trash/my-agent-tui-fix.sFXqlN`，可恢复，未触碰用户工作区 session。
+- README 与 `docs/known-issues.md` 已同步修复后的 Ctrl+T、运行指示器和验收状态。
+- `cargo install --path . --force` 已成功替换 `/Users/pilot/.cargo/bin/my-agent`；还需核对用户实际调用的 `myagent` 是否为同一二进制/链接。
+- 命令解析核对：`myagent` 是指向当前仓库 `target/release/my-agent` 的符号链接；PATH 中 `my-agent` 优先解析到 `/Users/pilot/.local/bin/my-agent`，因此又用 `cargo install --root /Users/pilot/.local --path . --force` 更新该实际命令。
+- 进一步审阅 `src/daemon/lifecycle.rs` 后确认它包含 daemon 指纹升级和日志落盘等语义改动，不可能由本轮 rustfmt 产生；这是本轮未编辑的独立用户工作，已完整保留。
+- 使用 `cmp` 核对三份可执行文件：仓库 release、`/Users/pilot/.local/bin/my-agent`、`/Users/pilot/.cargo/bin/my-agent` 逐字节一致，且都包含本轮 Ctrl+T 修复文案。
+- 最终审查将 Ctrl+T 锚点从单纯的顶部行偏移增强为“最近一条用户消息 ID + 行偏移回退”；多轮对话中会优先定位本轮原 Query。
+- 增强后 TUI 定向测试仍为 19/19 通过。
+- Query 锚点回归现包含“上一轮用户/Agent 消息 + 当前 Query + 80 行详情”，并断言锚点行号非零时当前 Query 仍可见；该定向测试通过。
+- 将测试包装函数收窄后，最终质量门禁全部通过：122/122 全量测试、严格 Clippy、格式检查、release 构建和 `git diff --check` 均为绿色。
+- 最终版已重新安装到 `/Users/pilot/.cargo/bin/my-agent` 与 `/Users/pilot/.local/bin/my-agent`；两者与仓库 `target/release/my-agent` 经 `cmp` 确认逐字节一致，`myagent`/`my-agent --version` 均正常返回 0.1.0。

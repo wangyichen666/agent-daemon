@@ -557,7 +557,7 @@
       <div class="metric"><strong>3</strong><span>个对等瘦入口</span></div>
       <div class="metric"><strong>8</strong><span>个可调用工具</span></div>
       <div class="metric"><strong>1</strong><span>个状态真相 daemon</span></div>
-      <div class="metric"><strong>50</strong><span>轮 ReAct 上限</span></div>
+      <div class="metric"><strong>∞</strong><span>主任务无固定轮次上限</span></div>
       <div class="metric"><strong>8</strong><span>路只读并发上限</span></div>
     </div>
   </header>
@@ -603,7 +603,7 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>全屏终端 TUI</h3>
-          <p>直接运行 <code>myagent</code> 进入全屏界面：默认继承终端前景与背景，也内置 dark/light 语义主题。界面支持结构化工具卡片、CJK 安全编辑、消息换行缓存、滚动跟随、发送队列、多轮次与独立审批队列。</p>
+          <p>直接运行 <code>myagent</code> 进入全屏界面：默认继承终端前景与背景，也内置 dark/light 语义主题。界面支持任务完成标记、默认折叠的工具调用摘要（Ctrl+T 可展开参数与输出细节）、CJK 安全编辑、消息换行缓存、滚动跟随、发送队列、多轮次与独立审批队列。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -729,10 +729,10 @@
           <div class="step-no">10</div>
           <div class="step-body">
             <h3>结果严格配对并回填</h3>
-            <p>每个结果携带原始 <code>tool_call_id</code> 并落盘；图片另以仅本 turn 有效的 user 内容块发送。连续三次完全相同的调用和结果只会触发软提醒。</p>
+            <p>每个结果携带原始 <code>tool_call_id</code> 并落盘；图片另以仅本 turn 有效的 user 内容块发送。工具失败会回填给模型修复，连续 3 次失败自动熔断；完全相同的调用和结果先软提醒，连续 10 次才按无进展循环熔断。</p>
           </div>
         </article>
-        <div class="loop-note"><strong>ReAct 回环：</strong>第 10 步回到第 04—06 步，最多循环 50 轮，防止意外无限调用。</div>
+        <div class="loop-note"><strong>ReAct 回环：</strong>第 10 步回到第 04—06 步；主任务每 50 轮执行进度检查后继续，完全相同的调用与结果连续 10 次或连续 3 次工具失败时才按失控循环熔断。</div>
         <article class="step">
           <div class="step-no">11</div>
           <div class="step-body">
@@ -947,7 +947,7 @@
         <article class="panel module-card"><h3><code>entry/</code></h3><p>全屏 TUI、CLI REPL、本地 HTTP/SSE + WebSocket 和标准 ACP stdio 入口；recovery helper 统一恢复逻辑。</p></article>
         <article class="panel module-card"><h3><code>provider.rs / provider/</code></h3><p>统一 Provider 契约、execution identity，以及 OpenAI、Anthropic、Ollama 的协议适配。</p></article>
         <article class="panel module-card"><h3><code>cron.rs / mcp.rs</code></h3><p>持久化本地调度与 heartbeat；自研 MCP stdio JSON-RPC、工具桥接、安全审批和子进程生命周期。</p></article>
-        <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、50 轮上限、并行波次、工具结果回填与最终终止判断。</p></article>
+        <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、长任务进度检查、无进展熔断、并行波次、工具结果回填与最终终止判断。</p></article>
         <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>
         <article class="panel module-card"><h3><code>safety.rs</code></h3><p>所有文件路径和命令的单一安全决策点；审批由 daemon 中介挂起和恢复。</p></article>
         <article class="panel module-card"><h3><code>session.rs</code></h3><p>稳定 ID 的独立 append-only JSONL、当前 session 指针、摘要列表、残缺末行恢复与 RAII turn 锁。</p></article>
@@ -1013,8 +1013,8 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、紧凑工具卡片和 sticky-bottom 新消息提示。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；F1 或 Ctrl+/ 打开快捷键帮助。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
-            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。另支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>。</li>
+            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、默认折叠的工具摘要、任务完成标记和 sticky-bottom 新消息提示。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+T 展开/收起工具调用与输出细节，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；按 Ctrl+/ 打开快捷键帮助（Mac 终端可用）。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
+            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。另支持 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/exit</code>。命令行还可用 <code>myagent status</code> 查看 daemon 日志路径、<code>myagent logs</code> 查看最近日志；这些诊断命令不需要模型环境变量。</li>
             <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
           </ol>

@@ -65,16 +65,37 @@ struct UiToolCall {
     call_id: Option<String>,
     name: String,
     heading: String,
+    round: usize,
     status: ToolStatus,
     output: Vec<String>,
     expanded: Option<bool>,
     started_at: Instant,
     finished_at: Option<Instant>,
+    duration_ms: Option<u64>,
 }
 
 struct ActiveTurn {
     request_id: RequestId,
     stream: RpcStream,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivityPhase {
+    Idle,
+    Recovering,
+    WaitingModel,
+    Streaming,
+    RunningTool,
+    WaitingApproval,
+}
+
+impl ActivityPhase {
+    fn is_animated(self) -> bool {
+        matches!(
+            self,
+            Self::Recovering | Self::WaitingModel | Self::Streaming | Self::RunningTool
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -127,8 +148,13 @@ struct TuiState {
     scroll: usize,
     follow_bottom: bool,
     unread_messages: usize,
+    transcript_start: usize,
+    preserve_transcript_start: Option<usize>,
+    preserve_message_id: Option<u64>,
     show_tools: bool,
     show_help: bool,
+    activity_phase: ActivityPhase,
+    animation_tick: u64,
     workspace: String,
     theme_mode: TuiThemeMode,
     resume_choices: Vec<SessionInfo>,
@@ -168,8 +194,19 @@ impl TuiState {
             scroll: 0,
             follow_bottom: true,
             unread_messages: 0,
+            transcript_start: 0,
+            preserve_transcript_start: None,
+            preserve_message_id: None,
             show_tools: false,
             show_help: false,
+            activity_phase: if has_pending {
+                ActivityPhase::WaitingApproval
+            } else if has_active {
+                ActivityPhase::Recovering
+            } else {
+                ActivityPhase::Idle
+            },
+            animation_tick: 0,
             workspace: std::env::current_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
@@ -195,7 +232,20 @@ impl TuiState {
         self.scroll = 0;
         self.follow_bottom = true;
         self.unread_messages = 0;
+        self.transcript_start = 0;
+        self.preserve_transcript_start = None;
+        self.preserve_message_id = None;
         self.show_help = false;
+        self.activity_phase = if self.pending_approvals.is_empty() {
+            if self.recovery_active_requests.is_empty() {
+                ActivityPhase::Idle
+            } else {
+                ActivityPhase::Recovering
+            }
+        } else {
+            ActivityPhase::WaitingApproval
+        };
+        self.animation_tick = 0;
         self.resume_choices.clear();
         self.render_cache.clear();
     }
@@ -282,7 +332,14 @@ impl TuiState {
         self.next_message_id = self.next_message_id.saturating_add(1);
     }
 
-    fn start_tool(&mut self, turn_id: RequestId, call_id: Option<String>, name: String) {
+    fn start_tool(
+        &mut self,
+        turn_id: RequestId,
+        call_id: Option<String>,
+        name: String,
+        round: usize,
+    ) {
+        self.activity_phase = ActivityPhase::RunningTool;
         if !self.follow_bottom {
             self.unread_messages = self.unread_messages.saturating_add(1);
         }
@@ -294,11 +351,13 @@ impl TuiState {
                 heading: tool_heading(&name),
                 name,
                 call_id,
+                round,
                 status: ToolStatus::Running,
                 output: Vec::new(),
                 expanded: None,
                 started_at: Instant::now(),
                 finished_at: None,
+                duration_ms: None,
             }),
             created_at: Instant::now(),
             token_usage: None,
@@ -314,6 +373,8 @@ impl TuiState {
         call_id: Option<&str>,
         name: &str,
         output: &str,
+        success: bool,
+        duration_ms: u64,
     ) {
         let Some(message) = self.messages.iter_mut().rev().find(|message| {
             matches!(
@@ -325,28 +386,59 @@ impl TuiState {
                             || (call_id.is_none() && tool.name == name))
             )
         }) else {
-            self.start_tool(turn_id.clone(), call_id.map(str::to_owned), name.to_owned());
-            self.finish_tool(turn_id, call_id, name, output);
+            self.start_tool(
+                turn_id.clone(),
+                call_id.map(str::to_owned),
+                name.to_owned(),
+                0,
+            );
+            self.finish_tool(turn_id, call_id, name, output, success, duration_ms);
             return;
         };
         if let UiMessageKind::Tool(tool) = &mut message.kind {
             tool.output = output.lines().map(str::to_owned).collect();
-            tool.status = if output.starts_with("工具执行错误:") {
-                ToolStatus::Failed
-            } else {
+            tool.status = if success {
                 ToolStatus::Ok
+            } else {
+                ToolStatus::Failed
             };
             tool.finished_at = Some(Instant::now());
+            tool.duration_ms = Some(duration_ms);
             message.content_version = message.content_version.saturating_add(1);
         }
+        self.activity_phase = ActivityPhase::WaitingModel;
     }
 
     fn request_quit(&mut self) {
         self.should_quit = true;
+        self.activity_phase = ActivityPhase::Idle;
         self.status = "再见".to_owned();
     }
 
+    fn toggle_tool_details(&mut self) {
+        self.preserve_transcript_start = Some(self.transcript_start);
+        self.preserve_message_id = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .map(|message| message.id);
+        self.follow_bottom = false;
+        self.show_tools = !self.show_tools;
+        self.status = if self.show_tools {
+            "工具详情已在原对话中展开".to_owned()
+        } else {
+            "工具调用已折叠".to_owned()
+        };
+    }
+
+    fn advance_animation(&mut self) {
+        self.animation_tick = self.animation_tick.wrapping_add(1);
+    }
+
     fn scroll_by(&mut self, lines: isize) {
+        self.preserve_transcript_start = None;
+        self.preserve_message_id = None;
         if lines.is_positive() {
             self.scroll = self.scroll.saturating_add(lines.unsigned_abs());
             self.follow_bottom = false;
@@ -360,11 +452,15 @@ impl TuiState {
     }
 
     fn scroll_to_top(&mut self) {
+        self.preserve_transcript_start = None;
+        self.preserve_message_id = None;
         self.scroll = usize::MAX;
         self.follow_bottom = false;
     }
 
     fn scroll_to_bottom(&mut self) {
+        self.preserve_transcript_start = None;
+        self.preserve_message_id = None;
         self.scroll = 0;
         self.follow_bottom = true;
         self.unread_messages = 0;
@@ -409,7 +505,9 @@ fn setup_terminal() -> Result<TuiTerminal> {
         let _ = terminal::disable_raw_mode();
         return Err(error).context("进入终端 alternate screen 失败");
     }
-    Terminal::new(CrosstermBackend::new(stdout)).context("创建 TUI 终端失败")
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).context("创建 TUI 终端失败")?;
+    terminal.clear().context("清空 TUI 屏幕失败")?;
+    Ok(terminal)
 }
 
 struct TerminalGuard;
@@ -445,6 +543,7 @@ async fn run_event_loop(
     state: &mut TuiState,
 ) -> Result<()> {
     let mut dirty = true;
+    let mut last_animation = Instant::now();
     while !state.should_quit {
         if dirty {
             terminal
@@ -504,11 +603,23 @@ async fn run_event_loop(
                 }
                 Ok(None) => {
                     state.active_turns.remove(index);
+                    if state.active_turns.is_empty() {
+                        state.activity_phase = ActivityPhase::Idle;
+                    }
                     state.status = "连接中断 · 退出后重新运行 myagent 可恢复".to_owned();
                     dirty = true;
                 }
                 Err(_) => index += 1,
             }
+        }
+        if state.activity_phase.is_animated()
+            && last_animation.elapsed() >= Duration::from_millis(90)
+        {
+            state.advance_animation();
+            last_animation = Instant::now();
+            dirty = true;
+        } else if !state.activity_phase.is_animated() {
+            last_animation = Instant::now();
         }
     }
     Ok(())
@@ -552,7 +663,7 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
         _ => {}
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
-        state.show_tools = !state.show_tools;
+        state.toggle_tool_details();
         return Ok(());
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
@@ -592,11 +703,21 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 recovery::respond_to_approval(client, &approval.id, true).await?;
                 state.pending_approvals.pop_front();
+                state.activity_phase = if state.pending_approvals.is_empty() {
+                    ActivityPhase::WaitingModel
+                } else {
+                    ActivityPhase::WaitingApproval
+                };
                 state.status = "审批已允许，继续执行".to_owned();
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => {
                 recovery::respond_to_approval(client, &approval.id, false).await?;
                 state.pending_approvals.pop_front();
+                state.activity_phase = if state.pending_approvals.is_empty() {
+                    ActivityPhase::WaitingModel
+                } else {
+                    ActivityPhase::WaitingApproval
+                };
                 state.status = "审批已拒绝，继续执行".to_owned();
             }
             _ => {}
@@ -655,6 +776,8 @@ async fn handle_frame(state: &mut TuiState, turn_id: &RequestId, frame: ServerFr
             EventKind::TextDelta => {
                 if let Some(delta) = event.data["delta"].as_str() {
                     state.append_assistant(turn_id, delta);
+                    state.activity_phase = ActivityPhase::Streaming;
+                    state.status = format!("模型流式输出 · request={turn_id:?}");
                 }
             }
             EventKind::ToolStarted => {
@@ -662,22 +785,36 @@ async fn handle_frame(state: &mut TuiState, turn_id: &RequestId, frame: ServerFr
                     turn_id.clone(),
                     event.data["tool_call_id"].as_str().map(str::to_owned),
                     event.data["name"].as_str().unwrap_or("unknown").to_owned(),
+                    event.data["round"].as_u64().unwrap_or_default() as usize,
                 );
                 state.status = format!(
-                    "工具执行中：{}",
+                    "request={turn_id:?} · 第 {} 轮 · 工具执行中：{}",
+                    event.data["round"].as_u64().unwrap_or_default(),
                     event.data["name"].as_str().unwrap_or("unknown")
                 );
             }
             EventKind::ToolFinished => {
+                let success = event.data["success"].as_bool().unwrap_or_else(|| {
+                    !event.data["output"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .starts_with("工具执行错误:")
+                });
+                let duration_ms = event.data["duration_ms"].as_u64().unwrap_or_default();
                 state.status = format!(
-                    "工具完成：{}",
-                    event.data["name"].as_str().unwrap_or("unknown")
+                    "request={turn_id:?} · 第 {} 轮 · 工具{}：{} · {}ms",
+                    event.data["round"].as_u64().unwrap_or_default(),
+                    if success { "完成" } else { "失败" },
+                    event.data["name"].as_str().unwrap_or("unknown"),
+                    duration_ms
                 );
                 state.finish_tool(
                     turn_id,
                     event.data["tool_call_id"].as_str(),
                     event.data["name"].as_str().unwrap_or("工具"),
                     event.data["output"].as_str().unwrap_or_default(),
+                    success,
+                    duration_ms,
                 );
             }
             EventKind::ApprovalRequired => {
@@ -686,9 +823,11 @@ async fn handle_frame(state: &mut TuiState, turn_id: &RequestId, frame: ServerFr
                     serde_json::from_value(event.data["approval"].clone())
                         .context("审批事件格式无效")?,
                 );
+                state.activity_phase = ActivityPhase::WaitingApproval;
                 state.status = format!("等待审批：还有 {} 项", state.pending_approvals.len());
             }
-            EventKind::TurnStarted | EventKind::TurnCompleted => {}
+            EventKind::TurnStarted => state.activity_phase = ActivityPhase::WaitingModel,
+            EventKind::TurnCompleted => {}
         },
         ServerFrame::Response(response) => {
             state
@@ -697,10 +836,29 @@ async fn handle_frame(state: &mut TuiState, turn_id: &RequestId, frame: ServerFr
             state
                 .pending_approvals
                 .retain(|approval| &approval.request_id != turn_id);
+            state.activity_phase = if state.pending_approvals.is_empty() {
+                if state.active_turns.is_empty() {
+                    ActivityPhase::Idle
+                } else {
+                    ActivityPhase::WaitingModel
+                }
+            } else {
+                ActivityPhase::WaitingApproval
+            };
             if let Some(error) = response.error {
+                state.push_text_for_turn(
+                    Role::System,
+                    format!("✗ 任务未完成 · request={turn_id:?} · {}", error.message),
+                    Some(turn_id.clone()),
+                );
                 state.status = format!("请求失败（{}）：{}", error.code, error.message);
             } else {
-                state.status = "就绪".to_owned();
+                state.push_text_for_turn(
+                    Role::System,
+                    format!("✓ 任务完成 · request={turn_id:?}"),
+                    Some(turn_id.clone()),
+                );
+                state.status = format!("任务完成 · request={turn_id:?}");
             }
         }
     }
@@ -753,11 +911,16 @@ async fn begin_turn(client: &DaemonClient, state: &mut TuiState, message: String
         )
         .await?;
     let request_id = stream.request_id().clone();
+    let request_label = format!("{request_id:?}");
     state.active_turns.push(ActiveTurn { request_id, stream });
+    state.activity_phase = ActivityPhase::WaitingModel;
     state.status = if state.queued_turns.is_empty() {
-        "Agent 正在工作".to_owned()
+        format!("等待模型响应 · request={request_label}")
     } else {
-        format!("Agent 正在工作 · 队列 {}", state.queued_turns.len())
+        format!(
+            "等待模型响应 · request={request_label} · 队列 {}",
+            state.queued_turns.len()
+        )
     };
     Ok(())
 }
@@ -867,7 +1030,7 @@ mod tests {
     use crate::context::{ContextConfig, ContextManager};
     use crate::daemon::DaemonState;
     use crate::daemon::approval::ApprovalBroker;
-    use crate::daemon::protocol::EventFrame;
+    use crate::daemon::protocol::{EventFrame, JsonRpcResponse};
     use crate::daemon::server::InMemoryServer;
     use crate::loop_engine::LoopEngine;
     use crate::plan::PlanStore;
@@ -983,6 +1146,37 @@ mod tests {
         assert!(state.messages.iter().any(|message| {
             message.turn_id.as_ref() == Some(&second) && message_text(message) == "来自 B"
         }));
+    }
+
+    #[tokio::test]
+    async fn shows_explicit_completion_marker_after_response() {
+        let request_id = RequestId::String("turn-complete".to_owned());
+        let mut state = TuiState::from_snapshot(recovery::RecoverySnapshot {
+            session_id: "test".to_owned(),
+            messages: Vec::new(),
+            pending_approvals: Vec::new(),
+            active_requests: Vec::new(),
+        });
+
+        handle_frame(
+            &mut state,
+            &request_id,
+            ServerFrame::Response(JsonRpcResponse::success(
+                request_id.clone(),
+                json!({"content": "完成"}),
+            )),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.status.contains("任务完成"));
+        assert_eq!(state.activity_phase, ActivityPhase::Idle);
+        assert!(
+            state
+                .messages
+                .iter()
+                .any(|message| message_text(message).contains("任务完成"))
+        );
     }
 
     #[tokio::test]
