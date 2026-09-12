@@ -412,7 +412,7 @@
 | 1. HTML 内容与视觉更新 | complete | 仓库 HTML 已补齐最新功能并通过 1600px 静态渲染；待最终同步桌面副本 |
 | 2. GitHub README 改版 | complete | 首屏定位清晰、功能/架构/快速开始完整，使用 GitHub 支持的视觉元素 |
 | 3. 渲染与内容验收 | complete | 1600px HTML 与 1200×420 SVG 渲染通过；结构、链接、JSON、格式和 122 项测试通过 |
-| 4. 提交与推送 | in_progress | 所有本轮改动提交到 `main` 并推送 `origin/main` |
+| 4. 提交与推送 | complete | 项目说明与 README 已提交并推送到 `origin/main`，GitHub 仓库页确认加载新版内容 |
 
 ## 原则
 
@@ -427,3 +427,4 @@
 |---|---:|---|
 | 内置浏览器安全策略拒绝本地 `file://` HTML | 1 | 不绕过策略，改用 Quick Look 1600px 静态渲染、HTMLParser 结构检查，并在推送后检查 GitHub 页面 |
 | 旧版 `tidy` 把 UTF-8/HTML5 标签误报为非法 | 1 | 不使用其结果作为门禁，改用 Python 标准库 HTMLParser 检查标签栈并结合实际渲染验收 |
+| 推送后内置浏览器加载 GitHub 页面超时并重置会话 | 2 | GitHub 文本抓取已确认新版 README 生效，且本地原尺寸视觉验收已通过；停止重复浏览器尝试 |
