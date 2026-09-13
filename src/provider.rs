@@ -7,6 +7,7 @@ mod wire_tests;
 use std::env;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -154,6 +155,143 @@ pub enum ApiType {
     OpenaiChat,
     AnthropicMessages,
     Ollama,
+}
+
+/// 一个可持久化的模型连接配置。API key 只在本地配置文件和进程内保存，
+/// 对外展示时应使用 `config::ProfileSummary`，不要把密钥序列化返回给 Web。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderProfile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub api_type: ApiType,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: String,
+    pub model: String,
+}
+
+impl ProviderProfile {
+    #[allow(dead_code)]
+    pub fn from_env() -> Result<Self> {
+        let api_type = ApiType::from_env()?;
+        let api_key = env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let base_url = env::var("OPENAI_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| match api_type {
+                ApiType::Ollama => "http://127.0.0.1:11434".to_owned(),
+                _ => String::new(),
+            });
+        let model = required_env("MODEL_NAME")?;
+        Ok(Self {
+            id: "environment".to_owned(),
+            name: "环境变量配置".to_owned(),
+            api_type,
+            api_key,
+            base_url,
+            model,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.id.trim().is_empty() {
+            bail!("模型配置 ID 不能为空");
+        }
+        if self.model.trim().is_empty() {
+            bail!("模型名称不能为空");
+        }
+        if !matches!(self.api_type, ApiType::Ollama)
+            && self
+                .api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            bail!("{} 配置需要 API key", self.api_type);
+        }
+        if self.base_url.trim().is_empty() {
+            bail!("服务地址不能为空");
+        }
+        let url = reqwest::Url::parse(&self.base_url)
+            .with_context(|| format!("服务地址不是合法 URL：{}", self.base_url))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("服务地址必须使用 http:// 或 https://");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ProviderSnapshot {
+    profile: ProviderProfile,
+    provider: Arc<dyn Provider>,
+}
+
+/// 运行时可热切换的 Provider。LoopEngine、上下文、子 Agent 和 Cron 都持有
+/// 这个稳定的 trait object，切换只替换内部实现，不会让已有 Session 失效。
+pub struct ProviderManager {
+    current: RwLock<ProviderSnapshot>,
+}
+
+impl ProviderManager {
+    pub fn new(profile: ProviderProfile) -> Result<Self> {
+        profile.validate()?;
+        let provider: Arc<dyn Provider> = Arc::from(build_provider_from_profile(&profile)?);
+        Ok(Self {
+            current: RwLock::new(ProviderSnapshot { profile, provider }),
+        })
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, ProviderSnapshot> {
+        match self.current.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub fn profile(&self) -> ProviderProfile {
+        self.read().profile.clone()
+    }
+
+    pub fn switch(&self, profile: ProviderProfile) -> Result<()> {
+        profile.validate()?;
+        let provider: Arc<dyn Provider> = Arc::from(build_provider_from_profile(&profile)?);
+        match self.current.write() {
+            Ok(mut guard) => *guard = ProviderSnapshot { profile, provider },
+            Err(poisoned) => *poisoned.into_inner() = ProviderSnapshot { profile, provider },
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Provider for ProviderManager {
+    fn api_type(&self) -> ApiType {
+        self.read().provider.api_type()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.read().provider.capabilities()
+    }
+
+    async fn chat(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<Response> {
+        let provider = self.read().provider.clone();
+        provider.chat(messages, tools).await
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        events: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Result<()> {
+        let provider = self.read().provider.clone();
+        provider.chat_stream(messages, tools, events).await
+    }
 }
 
 impl ApiType {
@@ -393,11 +531,30 @@ fn emit_legacy_response(
     }
 }
 
+#[allow(dead_code)]
 pub fn build_provider_from_env() -> Result<Box<dyn Provider>> {
-    match ApiType::from_env()? {
-        ApiType::OpenaiChat => Ok(Box::new(OpenAiProvider::from_env()?)),
-        ApiType::AnthropicMessages => Ok(Box::new(AnthropicProvider::from_env()?)),
-        ApiType::Ollama => Ok(Box::new(OllamaProvider::from_env()?)),
+    let profile = ProviderProfile::from_env()?;
+    build_provider_from_profile(&profile)
+}
+
+pub fn build_provider_from_profile(profile: &ProviderProfile) -> Result<Box<dyn Provider>> {
+    profile.validate()?;
+    match profile.api_type {
+        ApiType::OpenaiChat => Ok(Box::new(OpenAiProvider::new(
+            profile.api_key.clone().unwrap_or_default(),
+            profile.base_url.clone(),
+            profile.model.clone(),
+        ))),
+        ApiType::AnthropicMessages => Ok(Box::new(AnthropicProvider::new(
+            profile.api_key.clone().unwrap_or_default(),
+            profile.base_url.clone(),
+            profile.model.clone(),
+        ))),
+        ApiType::Ollama => Ok(Box::new(OllamaProvider::new(
+            profile.base_url.clone(),
+            profile.model.clone(),
+            optional_bool_env("OLLAMA_TOOLS_ENABLED", true)?,
+        ))),
     }
 }
 
@@ -461,5 +618,26 @@ mod tests {
             ExecutionIdentity::decode(&identity.encode()),
             Some(identity)
         );
+    }
+
+    #[test]
+    fn provider_manager_switches_without_replacing_shared_handle() {
+        let first = ProviderProfile {
+            id: "qwen".to_owned(),
+            name: "Qwen".to_owned(),
+            api_type: ApiType::Ollama,
+            api_key: None,
+            base_url: "http://127.0.0.1:11434".to_owned(),
+            model: "qwen3".to_owned(),
+        };
+        let second = ProviderProfile {
+            model: "llama3".to_owned(),
+            ..first.clone()
+        };
+        let manager = ProviderManager::new(first).unwrap();
+        assert_eq!(manager.profile().model, "qwen3");
+        manager.switch(second).unwrap();
+        assert_eq!(manager.profile().model, "llama3");
+        assert_eq!(manager.api_type(), ApiType::Ollama);
     }
 }

@@ -29,6 +29,9 @@
     activeView: "agent",
     collapsedDays: new Set(),
     permissionMode: null,
+    modelProfiles: [],
+    activeModelId: null,
+    modelConfigPath: "",
     transcriptRenderPending: false,
     thinkingFinished: false,
   };
@@ -140,6 +143,7 @@
       setConnection("online", "Agent 已连接");
       setAgentControls();
       await loadPermissionMode();
+      await loadModels();
       await refreshSessions();
     } catch (error) {
       if (state.rpc !== rpc) return;
@@ -185,6 +189,132 @@
       state.permissionMode = null;
       $("#permission-label").textContent = "不可用";
       toast(`读取权限模式失败：${error.message}`);
+    }
+  }
+
+  async function loadModels() {
+    try {
+      const result = await fetchJson("/api/models");
+      state.modelProfiles = result.profiles || [];
+      state.activeModelId = result.active_id || null;
+      state.modelConfigPath = result.config_path || "";
+      renderModelProfiles();
+      updateModelUi();
+    } catch (error) {
+      state.modelProfiles = [];
+      state.activeModelId = null;
+      updateModelUi();
+      toast(`读取模型配置失败：${error.message}`);
+    }
+  }
+
+  function updateModelUi() {
+    const active = state.modelProfiles.find((profile) => profile.id === state.activeModelId);
+    const label = active ? `${active.name || active.id} · ${active.model}` : "尚未配置模型";
+    $("#active-model").textContent = label;
+    $("#active-model").title = active ? `${active.api_type} · ${active.base_url}` : "";
+    $("#model-config-path").textContent = state.modelConfigPath ? `配置文件：${state.modelConfigPath}` : "";
+  }
+
+  function renderModelProfiles() {
+    const node = $("#model-profile-list");
+    if (!state.modelProfiles.length) {
+      node.innerHTML = `<div class="directory-empty">暂无已保存模型，请在下方添加。</div>`;
+      updateModelUi();
+      return;
+    }
+    node.innerHTML = state.modelProfiles.map((profile) => {
+      const active = profile.id === state.activeModelId ? " active" : "";
+      const key = profile.has_api_key ? "已配置 key" : "未配置 key";
+      return `<div class="model-profile${active}" data-model-profile="${escapeAttr(profile.id)}">
+        <button type="button" class="model-profile-main"><span><strong>${escapeHtml(profile.name || profile.id)}</strong><small>${escapeHtml(profile.api_type)} · ${escapeHtml(profile.model)} · ${key}</small></span></button>
+        <span class="model-profile-actions"><button type="button" data-model-edit="${escapeAttr(profile.id)}">编辑</button><button type="button" data-model-use="${escapeAttr(profile.id)}"${active ? " disabled" : ""}>使用</button></span>
+      </div>`;
+    }).join("");
+    $$('[data-model-profile]').forEach((item) => item.querySelector(".model-profile-main")?.addEventListener("click", () => editModelProfile(item.dataset.modelProfile)));
+    $$('[data-model-edit]').forEach((button) => button.addEventListener("click", () => editModelProfile(button.dataset.modelEdit)));
+    $$('[data-model-use]').forEach((button) => button.addEventListener("click", () => useModelProfile(button.dataset.modelUse)));
+    updateModelUi();
+  }
+
+  async function useModelProfile(id) {
+    if (!id || state.activeRequest) return;
+    try {
+      const result = await fetchJson("/api/models/activate", {
+        method: "POST",
+        headers: { ...authorizationHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: id, workspace: state.workspace || null }),
+      });
+      state.activeModelId = result.active_id || id;
+      await loadModels();
+      toast(result.warning ? `已保存切换；${result.warning}` : `已切换模型：${result.profile?.name || id}`);
+    } catch (error) {
+      toast(`切换模型失败：${error.message}`);
+    }
+  }
+
+  function editModelProfile(id) {
+    const profile = state.modelProfiles.find((item) => item.id === id);
+    if (!profile) return;
+    $("#model-profile-id").value = profile.id || "";
+    $("#model-profile-name").value = profile.name || "";
+    $("#model-api-type").value = profile.api_type || "openai-chat";
+    $("#model-name").value = profile.model || "";
+    $("#model-base-url").value = profile.base_url || "";
+    $("#model-api-key").value = "";
+    $("#model-activate").checked = profile.id === state.activeModelId;
+  }
+
+  async function saveModelProfile() {
+    if (state.activeRequest) {
+      toast("当前 Agent 正在工作，完成或停止本轮后再修改模型配置。");
+      return;
+    }
+    const apiType = $("#model-api-type").value;
+    const model = $("#model-name").value.trim();
+    const baseUrl = $("#model-base-url").value.trim();
+    const apiKey = $("#model-api-key").value.trim();
+    if (!model || !baseUrl) {
+      toast("请填写模型名称和服务地址。");
+      return;
+    }
+    if (apiType !== "ollama" && !apiKey) {
+      const id = $("#model-profile-id").value.trim();
+      const existing = state.modelProfiles.find((profile) => profile.id === id);
+      if (!existing?.has_api_key) {
+        toast("此厂商需要 API key；已有配置可留空以保留原 key。");
+        return;
+      }
+    }
+    const button = $("#save-model");
+    button.disabled = true;
+    try {
+      const result = await fetchJson("/api/models", {
+        method: "POST",
+        headers: { ...authorizationHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activate: $("#model-activate").checked,
+          workspace: state.workspace || null,
+          profile: {
+            id: $("#model-profile-id").value.trim(),
+            name: $("#model-profile-name").value.trim(),
+            api_type: apiType,
+            api_key: apiKey || null,
+            base_url: baseUrl,
+            model,
+          },
+        }),
+      });
+      state.activeModelId = result.active_id || state.activeModelId;
+      await loadModels();
+      toast(result.warning
+        ? `模型配置已保存；${result.warning}`
+        : `模型配置已保存：${result.profile?.name || model}`);
+      if (!state.connected) await connect(state.workspace || state.defaultWorkspace);
+    } catch (error) {
+      toast(`保存模型配置失败：${error.message}`);
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -1016,6 +1146,9 @@
     state.inspectedSnapshot = null;
     state.traces = [];
     state.permissionMode = null;
+    state.modelProfiles = [];
+    state.activeModelId = null;
+    state.modelConfigPath = "";
     state.thinkingFinished = false;
     state.inspectedMessageOffset = 0;
     state.inspectedMessageTotal = 0;
@@ -1031,8 +1164,8 @@
     updateAgentSessionUi();
   }
 
-  async function fetchJson(path) {
-    const response = await fetch(path, { headers: authorizationHeaders() });
+  async function fetchJson(path, options = {}) {
+    const response = await fetch(path, { ...options, headers: { ...authorizationHeaders(), ...(options.headers || {}) } });
     const value = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(value.error?.message || `请求失败：${response.status}`);
     return value;
@@ -1132,7 +1265,15 @@
   $("#settings").addEventListener("click", () => {
     $("#token").value = apiToken();
     $("#settings-dialog").showModal();
+    loadModels().catch((error) => toast(`读取模型配置失败：${error.message}`));
   });
+  $("#open-model-settings").addEventListener("click", () => {
+    $("#token").value = apiToken();
+    $("#settings-dialog").showModal();
+    loadModels().catch((error) => toast(`读取模型配置失败：${error.message}`));
+  });
+  $("#refresh-models").addEventListener("click", () => loadModels().catch((error) => toast(`读取模型配置失败：${error.message}`)));
+  $("#save-model").addEventListener("click", saveModelProfile);
   $("#reconnect").addEventListener("click", () => {
     localStorage.setItem("my-agent-token", $("#token").value.trim());
     $("#settings-dialog").close();

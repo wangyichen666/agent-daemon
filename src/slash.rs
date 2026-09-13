@@ -17,6 +17,7 @@ pub enum SlashAction {
     Cron,
     Mcp,
     Permissions,
+    Models,
     Dogfood,
     Web,
 }
@@ -118,6 +119,14 @@ const COMMANDS: &[SlashCommand] = &[
         usage: "/permissions [request|risk|full]",
         args: ArgSpec::OptionalOne("request、risk 或 full"),
         action: SlashAction::Permissions,
+    },
+    SlashCommand {
+        name: "models",
+        aliases: &["model"],
+        help: "列出或切换已保存的模型配置",
+        usage: "/models [编号|ID]",
+        args: ArgSpec::OptionalOne("编号或模型配置 ID"),
+        action: SlashAction::Models,
     },
     SlashCommand {
         name: "ping",
@@ -328,6 +337,13 @@ mod tests {
                 args,
             }) if args == ["full"]
         ));
+        assert!(matches!(
+            registry.parse("/models 2"),
+            SlashParse::Command(SlashInvocation {
+                action: SlashAction::Models,
+                args,
+            }) if args == ["2"]
+        ));
     }
 
     #[test]
@@ -340,6 +356,7 @@ mod tests {
         assert!(help.contains("/ping"));
         assert!(help.contains("/dogfood"));
         assert!(help.contains("/permissions [request|risk|full]"));
+        assert!(help.contains("/models [编号|ID]"));
     }
 
     #[test]

@@ -279,3 +279,13 @@
 - [x] 将工作目录与权限模式控件移入 composer 底部，并保留既有 ID、禁用逻辑、目录选择和权限模式弹窗。
 - [x] 为中间 transcript 增加“模型响应区域”语义和空状态说明，真实验证流式思考及正式 Markdown 响应。
 - [x] 完成桌面/390px 窄屏浏览器验收；140/140 测试、Clippy、格式/语法/diff、Release 安装通过，已提交并推送。
+
+# 2026-09-13 全局模型配置与 `/models`
+
+- [x] 完成配置与 Provider 审计，确定 JSON 配置文件、环境变量优先级和动态 Provider 方案。
+- [x] 配置持久化与环境变量加载：默认 `~/.config/my-agent/config.json`，支持 `MY_AGENT_CONFIG`/`XDG_CONFIG_HOME`。
+- [x] daemon 动态 Provider 与模型 RPC：`models.list`、`models.save`、`models.use`，活动 turn 期间保护切换。
+- [x] Web 模型配置/切换 UI：设置面板可添加多厂商配置、编辑、激活；无配置时 `serve` 仍可启动设置页。
+- [x] TUI `/models` 列表与切换：支持编号和配置 ID。
+- [x] 全量回归：143/143 测试、严格 Clippy、格式/JS 语法检查、release 构建和 `cargo install --path . --force` 通过。
+- [x] Web 模型保存/激活优先走 daemon 原子 RPC；活动 turn 期间返回冲突，不会出现全局配置已变而当前 daemon 未切换的不一致状态。

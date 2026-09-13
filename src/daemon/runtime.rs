@@ -7,13 +7,14 @@ use anyhow::Result;
 use super::DaemonState;
 use super::approval::ApprovalBroker;
 use super::lifecycle::RuntimePaths;
+use crate::config::ConfigStore;
 use crate::context::{ContextConfig, ContextManager};
 use crate::cron::{AgentCronRunner, CronManager, CronStore, UnattendedApproval};
 use crate::loop_engine::LoopEngine;
 use crate::mcp::McpManager;
 use crate::memory::{MemoryStore, RecallMemoryTool, RememberTool};
 use crate::plan::{PlanStore, PlanTool};
-use crate::provider::{Provider, build_provider_from_env};
+use crate::provider::{Provider, ProviderManager, ProviderProfile};
 use crate::safety::SafetyPolicy;
 use crate::session::SessionStore;
 use crate::skills::SkillLibrary;
@@ -21,7 +22,17 @@ use crate::sub_agent::SubAgentTool;
 use crate::tools::{EditFileTool, ExecTool, ReadFileTool, ToolRegistry, WriteFileTool};
 
 pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
-    let provider: Arc<dyn Provider> = Arc::from(build_provider_from_env()?);
+    let config_store = ConfigStore::default();
+    let profile = config_store
+        .active_profile()?
+        .or_else(|| ProviderProfile::from_env().ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "没有可用的模型配置；请运行 `myagent config check` 或先在 Web 设置中保存模型"
+            )
+        })?;
+    let provider_manager = Arc::new(ProviderManager::new(profile)?);
+    let provider: Arc<dyn Provider> = provider_manager.clone();
     let approvals = ApprovalBroker::new();
     let safety = Arc::new(SafetyPolicy::new(workspace, Arc::new(approvals.clone()))?);
     let mut tools = ToolRegistry::new();
@@ -82,17 +93,21 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     let session = Arc::new(SessionStore::from_env(workspace));
     let history = session.load().await?;
     let engine = Arc::new(LoopEngine::new(provider, tools, context, session.clone()));
-    let state = Arc::new(DaemonState::new_with_services_and_log_path_and_safety(
-        engine,
-        history,
-        session,
-        approvals,
-        Some(skills),
-        Some(cron.clone()),
-        Some(mcp),
-        RuntimePaths::for_workspace(workspace)?.log,
-        Some(safety),
-    ));
+    let state = Arc::new(
+        DaemonState::new_with_services_and_log_path_and_safety_and_provider(
+            engine,
+            history,
+            session,
+            approvals,
+            Some(skills),
+            Some(cron.clone()),
+            Some(mcp),
+            RuntimePaths::for_workspace(workspace)?.log,
+            Some(safety),
+            Some(provider_manager),
+            config_store,
+        ),
+    );
     cron.start(state.shutdown.clone()).await;
     Ok(state)
 }

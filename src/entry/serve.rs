@@ -21,12 +21,14 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
 use crate::client::{DaemonClient, RpcStream};
+use crate::config::{ConfigStore, ProfileSummary};
 use crate::daemon::lifecycle::RuntimePaths;
 use crate::daemon::protocol::{
     EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
     decode_request,
 };
 use crate::entry::recovery;
+use crate::provider::ProviderProfile;
 
 #[derive(Clone)]
 struct ApiState {
@@ -42,10 +44,28 @@ struct WorkspaceRouter {
     clients: Arc<Mutex<HashMap<PathBuf, DaemonClient>>>,
 }
 
+impl ApiState {
+    fn active_model(&self) -> String {
+        ConfigStore::default()
+            .active_profile()
+            .ok()
+            .flatten()
+            .map(|profile| profile.model)
+            .unwrap_or_else(|| self.model.clone())
+    }
+}
+
 impl WorkspaceRouter {
+    #[allow(dead_code)]
     fn new(default_workspace: PathBuf, default_client: DaemonClient) -> Self {
+        Self::with_optional(default_workspace, Some(default_client))
+    }
+
+    fn with_optional(default_workspace: PathBuf, default_client: Option<DaemonClient>) -> Self {
         let mut clients = HashMap::new();
-        clients.insert(default_workspace.clone(), default_client);
+        if let Some(default_client) = default_client {
+            clients.insert(default_workspace.clone(), default_client);
+        }
         Self {
             default_workspace,
             clients: Arc::new(Mutex::new(clients)),
@@ -114,6 +134,23 @@ struct DirectoryQuery {
     path: Option<PathBuf>,
 }
 
+#[derive(Deserialize)]
+struct ModelSaveRequest {
+    profile: ProviderProfile,
+    #[serde(default)]
+    activate: bool,
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct ModelUseRequest {
+    profile_id: String,
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+}
+
+#[allow(dead_code)]
 pub async fn run_http_server(
     client: DaemonClient,
     address: SocketAddr,
@@ -121,7 +158,17 @@ pub async fn run_http_server(
     bearer_token: Option<String>,
     workspace: PathBuf,
 ) -> Result<()> {
-    let workspaces = WorkspaceRouter::new(workspace.clone(), client);
+    run_http_server_optional(Some(client), address, model, bearer_token, workspace).await
+}
+
+pub async fn run_http_server_optional(
+    client: Option<DaemonClient>,
+    address: SocketAddr,
+    model: String,
+    bearer_token: Option<String>,
+    workspace: PathBuf,
+) -> Result<()> {
+    let workspaces = WorkspaceRouter::with_optional(workspace.clone(), client);
     let state = ApiState {
         workspaces,
         model,
@@ -148,6 +195,8 @@ fn api_router(state: ApiState) -> Router {
         .route("/styles.css", get(web_styles))
         .route("/health", get(health))
         .route("/api/directories", get(list_directories))
+        .route("/api/models", get(list_models).post(save_models))
+        .route("/api/models/activate", post(activate_model))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/ws", get(websocket_upgrade))
         .with_state(state)
@@ -541,11 +590,12 @@ async fn health(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     if !is_authorized(&headers, state.bearer_token.as_deref()) {
         return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
     }
+    let model = state.active_model();
     Json(json!({
         "status": "ok",
         "daemon": "managed",
         "workspace": state.workspace,
-        "model": state.model,
+        "model": model,
     }))
     .into_response()
 }
@@ -564,6 +614,154 @@ async fn list_directories(
     }
 }
 
+async fn list_models(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let store = ConfigStore::default();
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+    };
+    let mut profiles = config
+        .profiles
+        .iter()
+        .map(ProfileSummary::from_profile)
+        .collect::<Vec<_>>();
+    let active_id = config
+        .active_profile
+        .clone()
+        .or_else(|| ProviderProfile::from_env().ok().map(|profile| profile.id));
+    if profiles.is_empty()
+        && let Ok(profile) = ProviderProfile::from_env()
+    {
+        profiles.push(ProfileSummary::from_profile(&profile));
+    }
+    Json(json!({
+        "active_id": active_id,
+        "profiles": profiles,
+        "config_path": store.path(),
+        "providers": [
+            {"api_type": "openai-chat", "label": "OpenAI 兼容"},
+            {"api_type": "anthropic-messages", "label": "Anthropic Messages"},
+            {"api_type": "ollama", "label": "Ollama 本地模型"},
+        ],
+    }))
+    .into_response()
+}
+
+async fn save_models(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ModelSaveRequest>,
+) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let requested_workspace = request.workspace.clone();
+    let store = ConfigStore::default();
+    let profile = request.profile.clone();
+    match state
+        .workspaces
+        .client_for(requested_workspace.as_deref())
+        .await
+    {
+        Ok((_, client)) => {
+            let result = match crate::entry::cli::request_result(
+                &client,
+                "models.save",
+                json!({"profile": profile, "activate": request.activate}),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => return api_error(StatusCode::CONFLICT, format!("{error:#}")),
+            };
+            let mut response = result;
+            response["runtime_applied"] = json!(true);
+            response["warning"] = Value::Null;
+            response["config_path"] = json!(store.path());
+            Json(response).into_response()
+        }
+        Err(error) => {
+            let config = match store.upsert(request.profile, request.activate) {
+                Ok(config) => config,
+                Err(error) => return api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+            };
+            let Some(active_id) = config.active_profile.clone() else {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "保存后没有活动模型配置");
+            };
+            let active = config
+                .profiles
+                .iter()
+                .find(|profile| profile.id == active_id)
+                .cloned();
+            let Some(active) = active else {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "活动模型配置不存在");
+            };
+            Json(json!({
+                "changed": true,
+                "active_id": active.id,
+                "profile": ProfileSummary::from_profile(&active),
+                "runtime_applied": false,
+                "warning": format!("配置已保存，daemon 将在下次启动时应用：{error:#}"),
+                "config_path": store.path(),
+            }))
+            .into_response()
+        }
+    }
+}
+
+async fn activate_model(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ModelUseRequest>,
+) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let requested_workspace = request.workspace.clone();
+    let store = ConfigStore::default();
+    match state
+        .workspaces
+        .client_for(requested_workspace.as_deref())
+        .await
+    {
+        Ok((_, client)) => {
+            let result = match crate::entry::cli::request_result(
+                &client,
+                "models.use",
+                json!({"profile_id": request.profile_id}),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => return api_error(StatusCode::CONFLICT, format!("{error:#}")),
+            };
+            let mut response = result;
+            response["runtime_applied"] = json!(true);
+            response["warning"] = Value::Null;
+            response["config_path"] = json!(store.path());
+            Json(response).into_response()
+        }
+        Err(error) => {
+            let profile = match store.activate(&request.profile_id) {
+                Ok(profile) => profile,
+                Err(error) => return api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+            };
+            Json(json!({
+                "changed": true,
+                "active_id": profile.id,
+                "profile": ProfileSummary::from_profile(&profile),
+                "runtime_applied": false,
+                "warning": format!("已保存为下次启动的活动模型：{error:#}"),
+                "config_path": store.path(),
+            }))
+            .into_response()
+        }
+    }
+}
+
 async fn chat_completions(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -572,14 +770,15 @@ async fn chat_completions(
     if !is_authorized(&headers, state.bearer_token.as_deref()) {
         return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
     }
+    let active_model = state.active_model();
     if let Some(requested) = &request.model
-        && requested != &state.model
+        && requested != &active_model
     {
         return api_error(
             StatusCode::BAD_REQUEST,
             format!(
                 "当前 daemon 模型为 {}，不支持请求模型 {requested}",
-                state.model
+                active_model
             ),
         );
     }
@@ -600,7 +799,7 @@ async fn chat_completions(
     let completion_id = format!("chatcmpl-{}", request_id_text(rpc.request_id()));
     let created = unix_time();
     if request.stream {
-        let stream = completion_stream(rpc, client, state.model.clone(), completion_id, created);
+        let stream = completion_stream(rpc, client, active_model.clone(), completion_id, created);
         return Sse::new(stream)
             .keep_alive(KeepAlive::default())
             .into_response();
@@ -611,7 +810,7 @@ async fn chat_completions(
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
-            "model": state.model,
+            "model": active_model,
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": content},

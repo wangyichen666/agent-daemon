@@ -153,7 +153,7 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         0
     } else {
         (slash_suggestions.len() as u16 + 2)
-            .min(14)
+            .min(22)
             .min(slash_available)
     };
     let regions = Layout::vertical([

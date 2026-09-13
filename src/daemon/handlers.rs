@@ -15,8 +15,10 @@ use super::protocol::{
     EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
 };
 use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
+use crate::config::ProfileSummary;
 use crate::cron::ScheduleSpec;
 use crate::loop_engine::{AgentEvent, CancellationToken};
+use crate::provider::ProviderProfile;
 use crate::safety::SafetyMode;
 use crate::session::SessionStatus;
 use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
@@ -68,6 +70,18 @@ struct SessionPageParams {
 #[derive(Deserialize)]
 struct PermissionModeParams {
     mode: String,
+}
+
+#[derive(Deserialize)]
+struct ModelUseParams {
+    profile_id: String,
+}
+
+#[derive(Deserialize)]
+struct ModelSaveParams {
+    profile: ProviderProfile,
+    #[serde(default)]
+    activate: bool,
 }
 
 fn default_web_page_limit() -> usize {
@@ -144,6 +158,21 @@ impl DaemonState {
             "permissions.set" => {
                 let result = match parse_params::<PermissionModeParams>(&request.params) {
                     Ok(params) => self.permissions_set(&params.mode),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "models.list" => send_result(&frames, request.id, self.models_list()),
+            "models.use" => {
+                let result = match parse_params::<ModelUseParams>(&request.params) {
+                    Ok(params) => self.models_use(&params.profile_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "models.save" => {
+                let result = match parse_params::<ModelSaveParams>(&request.params) {
+                    Ok(params) => self.models_save(params).await,
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -596,6 +625,96 @@ impl DaemonState {
         }))
     }
 
+    fn models_list(&self) -> Result<Value, (i64, String)> {
+        let config = self
+            .config_store
+            .load()
+            .map_err(|error| (INTERNAL_ERROR, format!("读取模型配置失败：{error:#}")))?;
+        let active_id = config.active_profile.clone().or_else(|| {
+            self.provider_manager
+                .as_ref()
+                .map(|manager| manager.profile().id)
+        });
+        let mut profiles = config
+            .profiles
+            .iter()
+            .map(ProfileSummary::from_profile)
+            .collect::<Vec<_>>();
+        if profiles.is_empty()
+            && let Some(manager) = &self.provider_manager
+        {
+            profiles.push(ProfileSummary::from_profile(&manager.profile()));
+        }
+        Ok(json!({
+            "active_id": active_id,
+            "profiles": profiles,
+            "config_path": self.config_store.path(),
+            "providers": [
+                {"api_type": "openai-chat", "label": "OpenAI 兼容"},
+                {"api_type": "anthropic-messages", "label": "Anthropic Messages"},
+                {"api_type": "ollama", "label": "Ollama 本地模型"},
+            ],
+        }))
+    }
+
+    async fn models_use(&self, profile_id: &str) -> Result<Value, (i64, String)> {
+        if self.has_active_turns().await {
+            return Err((
+                REQUEST_CONFLICT,
+                "当前仍有 Agent 任务运行，请等待完成或取消后再切换模型".to_owned(),
+            ));
+        }
+        let Some(manager) = &self.provider_manager else {
+            return Err((INTERNAL_ERROR, "当前 daemon 未启用模型配置管理".to_owned()));
+        };
+        let profile = self
+            .config_store
+            .activate(profile_id)
+            .map_err(|error| (INVALID_PARAMS, format!("切换模型失败：{error:#}")))?;
+        manager
+            .switch(profile.clone())
+            .map_err(|error| (INVALID_PARAMS, format!("加载模型失败：{error:#}")))?;
+        Ok(json!({
+            "changed": true,
+            "active_id": profile.id,
+            "profile": ProfileSummary::from_profile(&profile),
+        }))
+    }
+
+    async fn models_save(&self, params: ModelSaveParams) -> Result<Value, (i64, String)> {
+        if self.has_active_turns().await {
+            return Err((
+                REQUEST_CONFLICT,
+                "当前仍有 Agent 任务运行，请等待完成或取消后再保存模型配置".to_owned(),
+            ));
+        }
+        let Some(manager) = &self.provider_manager else {
+            return Err((INTERNAL_ERROR, "当前 daemon 未启用模型配置管理".to_owned()));
+        };
+        let config = self
+            .config_store
+            .upsert(params.profile, params.activate)
+            .map_err(|error| (INVALID_PARAMS, format!("保存模型配置失败：{error:#}")))?;
+        let active_id = config.active_profile.clone();
+        let Some(active_id) = active_id else {
+            return Err((INTERNAL_ERROR, "保存后没有活动模型配置".to_owned()));
+        };
+        let profile = config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == active_id)
+            .cloned()
+            .ok_or_else(|| (INTERNAL_ERROR, "活动模型配置不存在".to_owned()))?;
+        manager
+            .switch(profile.clone())
+            .map_err(|error| (INVALID_PARAMS, format!("加载模型失败：{error:#}")))?;
+        Ok(json!({
+            "changed": true,
+            "active_id": profile.id,
+            "profile": ProfileSummary::from_profile(&profile),
+        }))
+    }
+
     fn permissions_set(&self, value: &str) -> Result<Value, (i64, String)> {
         let Some(safety) = self.safety.as_ref() else {
             return Err((
@@ -732,10 +851,16 @@ impl DaemonState {
                 SlashAction::Status => {
                     let current_session = self.session_runtime(session_id).await?;
                     let snapshot = self.session_snapshot(&current_session.id).await?;
+                    let model = self
+                        .provider_manager
+                        .as_ref()
+                        .map(|manager| manager.profile().model)
+                        .unwrap_or_else(|| "未配置".to_owned());
                     SlashResponse::Text {
                         content: format!(
-                            "会话 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
+                            "会话 {} · 模型 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
                             snapshot["session_id"].as_str().unwrap_or("unknown"),
+                            model,
                             snapshot["messages"].as_array().map_or(0, Vec::len),
                             snapshot["active_requests"].as_array().map_or(0, Vec::len),
                             snapshot["pending_approvals"].as_array().map_or(0, Vec::len),
@@ -795,6 +920,7 @@ impl DaemonState {
                 SlashAction::Cron => self.execute_cron_command(&invocation.args).await,
                 SlashAction::Mcp => self.execute_mcp_command(&invocation.args).await,
                 SlashAction::Permissions => self.execute_permissions_command(&invocation.args),
+                SlashAction::Models => self.execute_models_command(&invocation.args).await,
                 SlashAction::Ping => SlashResponse::Text {
                     content: "pong".to_owned(),
                 },
@@ -853,6 +979,79 @@ impl DaemonState {
         safety.set_mode(mode);
         SlashResponse::Text {
             content: format!("已切换权限模式：{}（{}）", mode.label(), mode.description()),
+        }
+    }
+
+    async fn execute_models_command(&self, args: &[String]) -> SlashResponse {
+        let listed = match self.models_list() {
+            Ok(value) => value,
+            Err((_, message)) => return SlashResponse::Text { content: message },
+        };
+        let active_id = listed
+            .get("active_id")
+            .and_then(Value::as_str)
+            .unwrap_or("未设置");
+        let profiles = listed
+            .get("profiles")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if args.is_empty() {
+            if profiles.is_empty() {
+                return SlashResponse::Text {
+                    content: format!(
+                        "暂无模型配置。请在 Web 设置中添加模型，或设置环境变量后重启 daemon。配置文件：{}",
+                        self.config_store.path().display()
+                    ),
+                };
+            }
+            let lines = profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| {
+                    let id = profile["id"].as_str().unwrap_or("unknown");
+                    let name = profile["name"].as_str().unwrap_or(id);
+                    let provider = profile["api_type"].as_str().unwrap_or("unknown");
+                    let model = profile["model"].as_str().unwrap_or("unknown");
+                    let marker = if id == active_id { "*" } else { " " };
+                    format!(
+                        "{marker} {}. {name} · {provider} · {model} · id={id}",
+                        index + 1
+                    )
+                })
+                .collect::<Vec<_>>();
+            return SlashResponse::Text {
+                content: format!(
+                    "当前模型：{active_id}\n{}\n切换用法：/models <编号或 ID>",
+                    lines.join("\n")
+                ),
+            };
+        }
+        let selection = &args[0];
+        let profile_id = match selection.parse::<usize>() {
+            Ok(index) if index > 0 => profiles
+                .get(index - 1)
+                .and_then(|profile| profile["id"].as_str())
+                .map(str::to_owned),
+            _ => Some(selection.clone()),
+        };
+        let Some(profile_id) = profile_id else {
+            return SlashResponse::Text {
+                content: format!("模型编号超出范围：{selection}"),
+            };
+        };
+        match self.models_use(&profile_id).await {
+            Ok(value) => {
+                let profile = value.get("profile").cloned().unwrap_or(Value::Null);
+                SlashResponse::Text {
+                    content: format!(
+                        "已切换模型：{} · {}",
+                        profile["name"].as_str().unwrap_or(&profile_id),
+                        profile["model"].as_str().unwrap_or("unknown")
+                    ),
+                }
+            }
+            Err((_, message)) => SlashResponse::Text { content: message },
         }
     }
 

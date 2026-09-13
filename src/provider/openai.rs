@@ -22,6 +22,7 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
+    #[allow(dead_code)]
     pub fn from_env() -> Result<Self> {
         let api_key = required_env("OPENAI_API_KEY")?;
         let base_url = required_env("OPENAI_BASE_URL")?;

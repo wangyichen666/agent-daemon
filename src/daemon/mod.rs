@@ -14,10 +14,11 @@ use tokio::sync::{Mutex, broadcast};
 
 use self::approval::ApprovalBroker;
 use self::protocol::{EventFrame, EventKind, JsonRpcResponse, RequestId, ServerFrame};
+use crate::config::ConfigStore;
 use crate::cron::CronManager;
 use crate::loop_engine::{CancellationToken, LoopEngine};
 use crate::mcp::McpManager;
-use crate::provider::Message;
+use crate::provider::{Message, ProviderManager};
 use crate::safety::SafetyPolicy;
 use crate::session::SessionStore;
 use crate::skills::SkillLibrary;
@@ -34,6 +35,8 @@ pub struct DaemonState {
     pub(crate) skills: Option<SkillLibrary>,
     pub(crate) cron: Option<Arc<CronManager>>,
     pub(crate) mcp: Option<Arc<McpManager>>,
+    pub(crate) provider_manager: Option<Arc<ProviderManager>>,
+    pub(crate) config_store: ConfigStore,
     pub(crate) daemon_log_path: PathBuf,
 }
 
@@ -198,6 +201,7 @@ impl DaemonState {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_services_and_log_path_and_safety(
         engine: Arc<LoopEngine>,
@@ -209,6 +213,35 @@ impl DaemonState {
         mcp: Option<Arc<McpManager>>,
         daemon_log_path: PathBuf,
         safety: Option<Arc<SafetyPolicy>>,
+    ) -> Self {
+        Self::new_with_services_and_log_path_and_safety_and_provider(
+            engine,
+            history,
+            session,
+            approvals,
+            skills,
+            cron,
+            mcp,
+            daemon_log_path,
+            safety,
+            None,
+            ConfigStore::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_services_and_log_path_and_safety_and_provider(
+        engine: Arc<LoopEngine>,
+        history: Vec<Message>,
+        session: Arc<SessionStore>,
+        approvals: ApprovalBroker,
+        skills: Option<SkillLibrary>,
+        cron: Option<Arc<CronManager>>,
+        mcp: Option<Arc<McpManager>>,
+        daemon_log_path: PathBuf,
+        safety: Option<Arc<SafetyPolicy>>,
+        provider_manager: Option<Arc<ProviderManager>>,
+        config_store: ConfigStore,
     ) -> Self {
         let default_session_id = session.current_id_sync();
         let default_session = Arc::new(SessionRuntime {
@@ -229,6 +262,8 @@ impl DaemonState {
             skills,
             cron,
             mcp,
+            provider_manager,
+            config_store,
             daemon_log_path,
         }
     }

@@ -93,6 +93,11 @@
                 <strong id="workspace-path">—</strong>
                 <button id="change-workspace" type="button">切换目录</button>
               </div>
+              <div class="workspace-card model-status-card">
+                <span>当前模型</span>
+                <strong id="active-model">尚未配置</strong>
+                <button id="open-model-settings" type="button">管理模型配置</button>
+              </div>
               <div class="task-card">
                 <span>当前 Session</span>
                 <strong id="agent-session-id">尚未选择</strong>
@@ -261,6 +266,36 @@
           <input id="token" type="password" autocomplete="off" placeholder="仅非回环绑定时需要" />
         </label>
         <p>Token 只保存在当前浏览器的 localStorage，不会写入 Session。</p>
+        <div class="settings-divider"></div>
+        <div class="model-settings-heading">
+          <div>
+            <h3>模型配置</h3>
+            <p>保存一次后，所有终端和工作区都可以复用。API key 只写入本机私有配置文件。</p>
+          </div>
+          <button id="refresh-models" class="quiet-button" type="button">刷新</button>
+        </div>
+        <div id="model-profile-list" class="model-profile-list">
+          <div class="directory-empty">正在读取模型配置…</div>
+        </div>
+        <div class="model-editor">
+          <div class="model-editor-grid">
+            <label>配置名称<input id="model-profile-name" type="text" placeholder="例如：DeepSeek 开发" /></label>
+            <label>配置 ID<input id="model-profile-id" type="text" placeholder="留空自动生成" /></label>
+            <label>AI 厂商
+              <select id="model-api-type">
+                <option value="openai-chat">OpenAI 兼容</option>
+                <option value="anthropic-messages">Anthropic Messages</option>
+                <option value="ollama">Ollama 本地模型</option>
+              </select>
+            </label>
+            <label>模型名称<input id="model-name" type="text" placeholder="deepseek-chat / qwen3" /></label>
+            <label class="model-editor-wide">服务地址<input id="model-base-url" type="url" placeholder="https://api.deepseek.com" /></label>
+            <label class="model-editor-wide">API key<input id="model-api-key" type="password" autocomplete="new-password" placeholder="留空表示保留已保存的 key" /></label>
+          </div>
+          <label class="model-activate"><input id="model-activate" type="checkbox" checked /> 保存后立即使用此模型</label>
+          <button id="save-model" class="primary-button compact full-width" type="button">保存模型配置</button>
+          <small id="model-config-path" class="model-config-path"></small>
+        </div>
         <button id="reconnect" class="primary-button compact full-width" value="cancel" type="button">保存并重新连接</button>
       </form>
     </dialog>

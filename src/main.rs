@@ -27,7 +27,7 @@ use daemon::runtime::build_daemon_state;
 use daemon::server::run_unix_server;
 use entry::cli::{print_session_list, print_sessions, request_result, run_chat, run_repl};
 use entry::editor::run_acp_server;
-use entry::serve::run_http_server;
+use entry::serve::run_http_server_optional;
 use entry::tui::run_tui;
 use serde_json::json;
 use session::SessionStore;
@@ -87,11 +87,16 @@ enum Command {
 enum ConfigCommand {
     #[command(about = "检查必需与可选环境变量")]
     Check,
+    #[command(about = "显示全局模型配置文件路径")]
+    Path,
+    #[command(about = "列出已保存模型配置（不会显示 API key）")]
+    List,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+    config::load_persisted_environment();
     let cli = Cli::parse();
     let workspace = canonical_workspace(&cli.workspace)?;
     let command = cli.command.unwrap_or(Command::Tui);
@@ -110,6 +115,11 @@ async fn main() -> Result<()> {
             request,
         } => run_logs_command(&workspace, lines, session.as_deref(), request.as_deref()).await,
         Command::Config(ConfigCommand::Check) => run_config_check(),
+        Command::Config(ConfigCommand::Path) => {
+            println!("{}", config::default_config_path().display());
+            Ok(())
+        }
+        Command::Config(ConfigCommand::List) => run_config_list(),
     }
 }
 
@@ -122,18 +132,22 @@ async fn run_editor_command(workspace: &Path) -> Result<()> {
 }
 
 async fn run_serve_command(workspace: &Path, bind: SocketAddr) -> Result<()> {
-    config::validate_environment()?;
+    config::load_persisted_environment();
     let bearer_token = std::env::var("MY_AGENT_API_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty());
     if !bind.ip().is_loopback() && bearer_token.is_none() {
         anyhow::bail!("非回环地址 {bind} 必须设置 MY_AGENT_API_TOKEN；建议默认使用 127.0.0.1:8787");
     }
-    let paths = RuntimePaths::for_workspace(workspace)?;
-    paths.ensure_daemon(workspace).await?;
-    let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-    let model = std::env::var("MODEL_NAME").context("缺少环境变量 MODEL_NAME")?;
-    run_http_server(client, bind, model, bearer_token, workspace.to_path_buf()).await
+    let client = if config::check_environment().is_empty() {
+        let paths = RuntimePaths::for_workspace(workspace)?;
+        paths.ensure_daemon(workspace).await?;
+        Some(client::DaemonClient::connect_unix(&paths.socket).await?)
+    } else {
+        None
+    };
+    let model = std::env::var("MODEL_NAME").unwrap_or_else(|_| "未配置".to_owned());
+    run_http_server_optional(client, bind, model, bearer_token, workspace.to_path_buf()).await
 }
 
 async fn run_chat_command(workspace: &Path, prompt: Vec<String>) -> Result<()> {
@@ -279,14 +293,52 @@ fn log_line_matches_request(line: &str, request: &str) -> bool {
 fn run_config_check() -> Result<()> {
     let issues = config::check_environment();
     if issues.is_empty() {
-        println!("配置检查通过。API 密钥已设置（值不会显示）。");
+        println!(
+            "配置检查通过。API 密钥已设置（值不会显示）。\n全局配置文件：{}",
+            config::default_config_path().display()
+        );
         return Ok(());
     }
     println!("配置检查发现 {} 个问题：", issues.len());
     for issue in &issues {
         println!("- {}：{}", issue.variable, issue.message);
     }
-    anyhow::bail!("配置尚未就绪；请修正以上环境变量")
+    anyhow::bail!(
+        "配置尚未就绪。可运行 `myagent serve` 打开 Web 设置保存模型，或修正以上环境变量；配置文件：{}",
+        config::default_config_path().display()
+    )
+}
+
+fn run_config_list() -> Result<()> {
+    let store = config::ConfigStore::default();
+    let file = store.load()?;
+    if file.profiles.is_empty() {
+        println!("暂无已保存模型配置。\n配置文件：{}", store.path().display());
+        return Ok(());
+    }
+    println!("全局配置文件：{}", store.path().display());
+    for profile in file.profiles {
+        let marker = if file.active_profile.as_deref() == Some(profile.id.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        let name = if profile.name.trim().is_empty() {
+            profile.id.clone()
+        } else {
+            profile.name
+        };
+        println!(
+            "{marker} {name} · {} · {} · key={}",
+            profile.api_type,
+            profile.model,
+            profile
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+        );
+    }
+    Ok(())
 }
 
 fn canonical_workspace(path: &Path) -> Result<PathBuf> {

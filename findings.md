@@ -443,6 +443,17 @@
 - 同一回归暴露一个空 assistant 占位：模型在首个增量前失败时草稿节点没有内容但仍被渲染为 Agent 标签；应在失败分支移除空草稿，若已有部分增量则保留。
 - 空 assistant 草稿已按对象身份在失败分支移除；已有部分流式内容时不会删除，可保留模型中途失败前的有效输出。
 - 浏览器创建三个空 Session 后发现它们的 `updated_at` 为 null；这类刚创建的 Session 应归入“今天”，否则用户无法折叠/展开今天分组。
+
+# 2026-09-13 全局模型配置需求
+
+- 当前 Provider 仅从 `API_TYPE`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`MODEL_NAME` 环境变量构造；`main` 在启动 TUI/serve/daemon 前直接校验，因此新终端不会继承一次性 shell 配置。
+- 当前 daemon 在 `build_daemon_state` 中只创建一个固定 `Arc<dyn Provider>`，LoopEngine、ContextManager、SubAgent 和 Cron 均共享该实例；Web/TUI 没有配置 RPC。
+- `DaemonState.active` 已能判断活动 turn；切换模型若不想中断工作，应在有活动请求时返回冲突，再替换共享 Provider。
+- 每个工作区只有一个 daemon，但 daemon 内 `sessions: HashMap` 明确支持多个独立 Session 并行；同一 Session 由 SessionStore/LoopEngine 的 turn lock 串行。
+- `/models` 最小兼容方案是 slash 列出配置并接受编号/ID，避免为 TUI 增加新的交互状态；Web 通过独立 RPC 提供下拉与编辑表单。
+- 配置无效或缺失时 Web `serve` 不能依赖 daemon 启动；因此新增无 daemon 的设置页启动路径，`/api/models` 先落盘配置，再按所选工作区启动/切换 daemon。
+- Web 模型配置 API 需要携带当前 WebSocket 所选工作区，否则切换跨目录页面时会误应用到 serve 默认目录；请求现带 `workspace` 并由 WorkspaceRouter 再次 canonicalize。
+- `ConfigStore::upsert` 对空 API key 保留原 profile 的已保存 key，避免编辑远程模型时清空密码；所有响应只返回 `has_api_key`。
 - 日期分组按 ISO 日键降序排列；无时间戳的新 Session 回退到当天，真正无法解析的历史值仍归入“日期未知”。
 - 最新嵌入资源的浏览器回归确认三个新建空 Session 均归入“今天”，今天分组默认展开并正确显示数量；点击日期标题后 Session 条目全部隐藏，日期标题保留。
 

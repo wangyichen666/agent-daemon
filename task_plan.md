@@ -723,3 +723,35 @@
 
 - cargo test --all-targets 140/140、严格 Clippy、rustfmt、Node 语法、diff 检查通过；Release 已重新构建并安装到 /Users/pilot/.cargo/bin/my-agent 与 /Users/pilot/.local/bin/my-agent，两份二进制一致。
 - 隔离浏览器、模拟 Provider 与 18884 服务已关闭；验收使用的工作区/脚本位于 /Users/pilot/.Trash，可恢复；8787 既有用户服务未由本轮启动。
+
+## 全局模型配置与 `/models`（2026-09-13）
+
+### 目标
+
+1. 配置不再只依赖当前终端环境变量；支持一次保存后全局复用，并在缺失时给出可操作提示。
+2. 支持多个 OpenAI 兼容、Anthropic Messages 和 Ollama 模型配置。
+3. Web 设置与 TUI `/models` 可列出、保存和切换活动模型；切换在活动 turn 期间明确拒绝。
+
+### 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---:|---|
+| 0. 配置与 Provider 审计 | complete | 明确持久化格式、环境变量兼容和运行时 Provider 所有权 |
+| 1. 全局配置与动态 Provider | complete | 配置文件安全保存，daemon 能在空闲时切换模型 |
+| 2. Web/TUI 入口 | complete | Web 表单、模型列表、`/models` 列表/切换 |
+| 3. 回归与交付 | complete | 全量测试、Clippy、前端语法、发布安装与提交推送 |
+
+### 约束
+
+- 环境变量继续兼容，并优先级高于持久化配置，避免破坏现有部署。
+- API 密钥响应只返回是否已设置；配置文件创建为用户私有权限。
+- 切换模型不得中断正在执行的 turn；无活动请求时立即生效。
+- 旧 Session 和旧 daemon 协议保持兼容。
+
+### 验收记录
+
+- 无配置时 `myagent config check` 汇总缺失项并指向全局配置文件；`myagent serve` 可先启动未配置 Web 页面。
+- Web `/api/models` 支持保存/列出/激活配置，覆盖 OpenAI 兼容、Anthropic Messages、Ollama；API key 只返回 `has_api_key`。
+- daemon 通过稳定 `ProviderManager` 热切换 Provider；活动 turn 期间切换明确返回冲突。
+- TUI `/models` 列出配置并支持 `/models 2` 或 `/models <ID>` 切换。
+- `cargo test --all-targets` 143/143、严格 Clippy、rustfmt、Node 语法和 release 构建均通过；发布版已安装到 Cargo PATH。

@@ -19,6 +19,7 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
+    #[allow(dead_code)]
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var("OPENAI_BASE_URL")
             .ok()

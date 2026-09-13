@@ -128,6 +128,8 @@ cargo build --release
 
 ### 2. 配置 Provider
 
+首次使用也可以直接运行 `my-agent serve`，打开 Web 工作台右上角设置，在“模型配置”中保存一次；配置会写入用户级文件（默认 `~/.config/my-agent/config.json`，可用 `MY_AGENT_CONFIG` 或 `XDG_CONFIG_HOME` 调整），后续新终端自动复用。文件权限为用户私有，API key 不会出现在 Session 或接口返回中。
+
 OpenAI 兼容服务示例：
 
 ```bash
@@ -185,7 +187,10 @@ my-agent
 /new       /cancel    /skill      /cron
 /mcp       /ping      /dogfood    /web       /exit
 /permissions [request|risk|full]
+/models [编号|ID]
 ```
+
+`/models` 不带参数时列出已保存配置；例如 `/models 2` 或 `/models deepseek` 会切换活动模型。Web 设置支持保存多个 OpenAI 兼容、Anthropic Messages 和 Ollama 配置；Agent 正在执行任务时切换会被拒绝，避免中途改变请求。
 
 在 TUI 输入 `/dogfood` 会在 session 文件所在目录生成 `dogfood-<session>.log`，其中包含当前 session 的原始 LLM/ReAct 对话（用户消息、助手回复、工具调用参数和工具输出），以及按 `session_id` 筛选的 daemon 全链路日志。TUI 只显示生成文件的绝对路径，不把日志正文塞入对话区。
 
@@ -285,6 +290,7 @@ MCP server 以当前用户权限运行，只应连接可信本地配置。图片
 | `SKILLS_DIR` | `.my-agent/skills` | 本地 Skill 目录。 |
 | `MY_AGENT_API_TOKEN` | 未设置 | 非回环 HTTP/WebSocket 的 Bearer Token。 |
 | `MY_AGENT_WEB_ADDR` | `127.0.0.1:8787` | TUI `/web` 使用的本地控制台地址；自动启动仅允许回环地址。 |
+| `MY_AGENT_CONFIG` | `~/.config/my-agent/config.json` | 全局模型配置文件路径；环境变量仍优先于文件中的同名字段。 |
 | `MY_AGENT_TUI_THEME` | `terminal` | `terminal`、`dark` 或 `light`。 |
 | `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 时捕获鼠标滚轮。 |
 | `MY_AGENT_EXEC_TIMEOUT_SECS` | `300` | `exec` 单次最长运行秒数。 |
