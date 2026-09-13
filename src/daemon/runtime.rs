@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use super::DaemonState;
 use super::approval::ApprovalBroker;
+use super::lifecycle::RuntimePaths;
 use crate::context::{ContextConfig, ContextManager};
 use crate::cron::{AgentCronRunner, CronManager, CronStore, UnattendedApproval};
 use crate::loop_engine::LoopEngine;
@@ -81,7 +82,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     let session = Arc::new(SessionStore::from_env(workspace));
     let history = session.load().await?;
     let engine = Arc::new(LoopEngine::new(provider, tools, context, session.clone()));
-    let state = Arc::new(DaemonState::new_with_services(
+    let state = Arc::new(DaemonState::new_with_services_and_log_path(
         engine,
         history,
         session,
@@ -89,6 +90,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
         Some(skills),
         Some(cron.clone()),
         Some(mcp),
+        RuntimePaths::for_workspace(workspace)?.log,
     ));
     cron.start(state.shutdown.clone()).await;
     Ok(state)

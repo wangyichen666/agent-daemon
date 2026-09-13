@@ -429,3 +429,36 @@
 | 旧版 `tidy` 把 UTF-8/HTML5 标签误报为非法 | 1 | 不使用其结果作为门禁，改用 Python 标准库 HTMLParser 检查标签栈并结合实际渲染验收 |
 | 推送后内置浏览器加载 GitHub 页面超时并重置会话 | 2 | GitHub 文本抓取已确认新版 README 生效，且本地原尺寸视觉验收已通过；停止重复浏览器尝试 |
 | 临时预览清理脚本使用 `path` 覆盖 zsh 的 PATH 数组 | 1 | 改用 `preview_item` 变量并显式调用 `/bin/mv`、`/usr/bin/find`；预览文件已移入可恢复的废纸篓目录 |
+
+# 本地 Agent Web 控制台（2026-09-13）
+
+## 目标
+
+为现有 daemon 增加同源 Web 控制台：既能发起 Agent 对话，也能列出所有本地 Session，并查看每个 Session 的消息、LLM 请求/响应、工具调用与时间链路；TUI 展示 Web 地址并提供 `/web` 启动或复用、随后打开浏览器的入口。
+
+## 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 0. 现状与数据契约审计 | complete | 确认 HTTP/WS、Session JSONL、事件字段、daemon 生命周期、slash/TUI 边界 |
+| 1. 可观测数据与 Web API | complete | 提供 Session 列表/详情、链路记录与调用 Agent 的同源 API，保持 daemon 为唯一真相源 |
+| 2. Web 前端 | complete | 完成对话工作台、Session 浏览器、详情时间线与响应式布局 |
+| 3. TUI `/web` 集成 | complete | 状态区显示地址；`/web` 幂等启动/复用并打开系统浏览器 |
+| 4. 验收与文档 | complete | 单测/集成/浏览器烟雾、fmt、Clippy、全量测试、release 和 README 更新 |
+
+## 本轮约束
+
+- 保留当前工作树中尚未提交的 dogfood、slash 补全与 TUI 相关改动，不覆盖或回退。
+- Web 仅默认监听 loopback；复用现有鉴权、安全审批、session 隔离与 daemon RPC，不在前端复制 Agent 逻辑。
+- Session 详情必须能区分用户/assistant/tool 消息，并尽可能呈现模型请求、响应、工具与阶段时间；不伪造历史上未持久化的时间字段。
+- `/web` 重复调用不得重复启动服务；成功后给出稳定 URL 并尝试打开默认浏览器。
+
+## 本轮错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+| 首次跨三个规划文件的补丁因 `findings.md` 锚点不存在而整体拒绝 | 1 | 补丁未落盘；改用每个文件的真实末尾锚点追加，不重复旧锚点 |
+| 首次 trace 接线补丁保留了旧方法调用的一行链式前缀 | 1 | 编译前源码检查发现并删除多余 `.run_turn_with_events(`，未形成重复失败 |
+| 新增 `ApiState.workspace` 后测试 fixture 漏填字段 | 1 | `cargo check --all-targets` 精确定位；为唯一测试构造器补入当前工作区 |
+| 首次 CUA 初始化调用漏传 `code`，随后又误用了不可用的 `tools` 全局 | 1 | 两次均未操作页面；读取工具返回的正式 API 后改用 `cua.getState/createBrowserTab` |
+| CUA 创建标签时误传不支持的 `max_output_chars`，并尝试了不可用的 Chrome provider | 1 | 根据 schema 移除多余字段，枚举可用浏览器后改用 Codex in-app browser |

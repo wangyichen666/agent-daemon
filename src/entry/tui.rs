@@ -20,7 +20,7 @@ use crate::daemon::protocol::{EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
 use crate::provider::{Message, Role};
 use crate::session::SessionInfo;
-use crate::slash::SlashResponse;
+use crate::slash::{SlashAction, SlashCommand, SlashParse, SlashRegistry, SlashResponse};
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -156,8 +156,10 @@ struct TuiState {
     activity_phase: ActivityPhase,
     animation_tick: u64,
     workspace: String,
+    web_url: String,
     theme_mode: TuiThemeMode,
     resume_choices: Vec<SessionInfo>,
+    slash_selection: usize,
     render_cache: HashMap<RenderCacheKey, Vec<Line<'static>>>,
 }
 
@@ -210,8 +212,10 @@ impl TuiState {
             workspace: std::env::current_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
+            web_url: crate::entry::web::configured_url(),
             theme_mode: TuiThemeMode::from_env(),
             resume_choices: Vec::new(),
+            slash_selection: 0,
             render_cache: HashMap::new(),
         }
     }
@@ -247,6 +251,7 @@ impl TuiState {
         };
         self.animation_tick = 0;
         self.resume_choices.clear();
+        self.slash_selection = 0;
         self.render_cache.clear();
     }
 
@@ -465,6 +470,45 @@ impl TuiState {
         self.follow_bottom = true;
         self.unread_messages = 0;
     }
+
+    fn slash_suggestions(&self) -> Vec<&'static SlashCommand> {
+        SlashRegistry::builtin().suggestions(&self.input.text())
+    }
+
+    fn select_previous_slash(&mut self) {
+        let count = self.slash_suggestions().len();
+        if count > 0 {
+            self.slash_selection = self.slash_selection.checked_sub(1).unwrap_or(count - 1);
+        }
+    }
+
+    fn select_next_slash(&mut self) {
+        let count = self.slash_suggestions().len();
+        if count > 0 {
+            self.slash_selection = (self.slash_selection + 1) % count;
+        }
+    }
+
+    fn selected_slash(&self) -> Option<&'static SlashCommand> {
+        let suggestions = self.slash_suggestions();
+        suggestions
+            .get(
+                self.slash_selection
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    fn complete_selected_slash(&mut self) {
+        if let Some(command) = self.selected_slash() {
+            self.input.replace(command.completion());
+            self.slash_selection = 0;
+        }
+    }
+
+    fn reset_slash_selection(&mut self) {
+        self.slash_selection = 0;
+    }
 }
 
 pub async fn run_tui(client: DaemonClient, workspace: &std::path::Path) -> Result<()> {
@@ -478,7 +522,8 @@ pub async fn run_tui(client: DaemonClient, workspace: &std::path::Path) -> Resul
         }
     }
     state.workspace = workspace.display().to_string();
-    state.status = format!("新会话 {session_id} · /resume 恢复历史");
+    state.web_url = crate::entry::web::configured_url();
+    state.status = format!("新会话 {session_id} · /web 打开 {}", state.web_url);
 
     let _guard = TerminalGuard;
     let mut terminal = setup_terminal()?;
@@ -561,7 +606,8 @@ async fn run_event_loop(
                     }
                 }
                 Event::Paste(text) if state.pending_approvals.is_empty() && !state.show_help => {
-                    state.input.insert_text(&text)
+                    state.input.insert_text(&text);
+                    state.reset_slash_selection();
                 }
                 Event::Mouse(_) if state.show_help => {}
                 Event::Mouse(mouse) => match mouse.kind {
@@ -629,6 +675,9 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
     if key.code == KeyCode::Esc {
         if state.show_help {
             state.show_help = false;
+        } else if state.input.text().trim_start().starts_with('/') {
+            state.input.clear();
+            state.reset_slash_selection();
         } else {
             state.request_quit();
         }
@@ -668,6 +717,7 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
         state.input.clear();
+        state.reset_slash_selection();
         state.history_cursor = None;
         return Ok(());
     }
@@ -725,6 +775,28 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
         return Ok(());
     }
 
+    if let Some(selected) = state.selected_slash() {
+        match key.code {
+            KeyCode::Up => {
+                state.select_previous_slash();
+                return Ok(());
+            }
+            KeyCode::Down => {
+                state.select_next_slash();
+                return Ok(());
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                state.complete_selected_slash();
+                return Ok(());
+            }
+            KeyCode::Enter if !selected.matches_exact(&state.input.text()) => {
+                state.complete_selected_slash();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.input.move_word_left()
@@ -749,17 +821,29 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
         KeyCode::Up if state.input.is_single_line() => state.history_previous(),
         KeyCode::Down if state.input.is_single_line() => state.history_next(),
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.input.delete_word_left()
+            state.input.delete_word_left();
+            state.reset_slash_selection();
         }
-        KeyCode::Backspace => state.input.backspace(),
-        KeyCode::Delete => state.input.delete(),
+        KeyCode::Backspace => {
+            state.input.backspace();
+            state.reset_slash_selection();
+        }
+        KeyCode::Delete => {
+            state.input.delete();
+            state.reset_slash_selection();
+        }
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.input.delete_word_left()
+            state.input.delete_word_left();
+            state.reset_slash_selection();
         }
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.input.insert(character)
+            state.input.insert(character);
+            state.reset_slash_selection();
         }
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => state.input.insert('\n'),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+            state.input.insert('\n');
+            state.reset_slash_selection();
+        }
         KeyCode::Enter if !state.input.is_blank() => {
             let message = state.input.take();
             state.record_history(&message);
@@ -926,6 +1010,25 @@ async fn begin_turn(client: &DaemonClient, state: &mut TuiState, message: String
 }
 
 async fn execute_slash(client: &DaemonClient, state: &mut TuiState, line: &str) -> Result<()> {
+    if matches!(
+        SlashRegistry::builtin().parse(line),
+        SlashParse::Command(crate::slash::SlashInvocation {
+            action: SlashAction::Web,
+            ..
+        })
+    ) {
+        let launch =
+            crate::entry::web::ensure_and_open(std::path::Path::new(&state.workspace)).await?;
+        let action = if launch.started {
+            "已启动并打开"
+        } else {
+            "已在运行，已打开"
+        };
+        state.web_url = launch.url.clone();
+        state.push_text(Role::System, format!("{action} Web 控制台：{}", launch.url));
+        state.status = format!("Web 控制台 · {}", launch.url);
+        return Ok(());
+    }
     let value = crate::entry::cli::request_result(
         client,
         "slash.execute",
@@ -1071,6 +1174,30 @@ mod tests {
         state.request_quit();
         assert!(state.should_quit);
         assert_eq!(state.status, "再见");
+    }
+
+    #[test]
+    fn slash_menu_filters_selects_and_completes_commands() {
+        let mut state = TuiState::from_snapshot(recovery::RecoverySnapshot {
+            session_id: "test".to_owned(),
+            messages: Vec::new(),
+            pending_approvals: Vec::new(),
+            active_requests: Vec::new(),
+        });
+        state.input.replace("/");
+        assert_eq!(
+            state.slash_suggestions().len(),
+            SlashRegistry::builtin().commands().len()
+        );
+        state.select_next_slash();
+        state.complete_selected_slash();
+        assert_eq!(state.input.text(), "/status");
+
+        state.input.replace("/do");
+        state.reset_slash_selection();
+        assert_eq!(state.slash_suggestions().len(), 1);
+        state.complete_selected_slash();
+        assert_eq!(state.input.text(), "/dogfood");
     }
 
     #[test]

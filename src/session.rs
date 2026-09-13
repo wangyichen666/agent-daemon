@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tracing::warn;
 
-use crate::provider::{Message, Role};
+use crate::provider::{Message, Role, ToolSpec};
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -30,6 +30,66 @@ pub enum SessionError {
     UnknownSession(String),
     #[error("非法会话 ID: {0}")]
     InvalidSessionId(String),
+    #[error("会话 trace 文件第 {line} 行损坏: {source}")]
+    CorruptTraceLine {
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionTraceRecord {
+    TurnStarted {
+        timestamp_ms: u64,
+        request_id: String,
+        input: String,
+    },
+    ModelRequest {
+        timestamp_ms: u64,
+        request_id: String,
+        round: usize,
+        provider: String,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+    },
+    ModelResponse {
+        timestamp_ms: u64,
+        request_id: String,
+        round: usize,
+        duration_ms: u64,
+        first_delta_ms: Option<u64>,
+        success: bool,
+        response: Option<serde_json::Value>,
+        error: Option<String>,
+    },
+    ToolStarted {
+        timestamp_ms: u64,
+        request_id: String,
+        round: usize,
+        tool_call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolFinished {
+        timestamp_ms: u64,
+        request_id: String,
+        round: usize,
+        tool_call_id: String,
+        name: String,
+        duration_ms: u64,
+        success: bool,
+        output: String,
+        error: Option<String>,
+    },
+    TurnCompleted {
+        timestamp_ms: u64,
+        request_id: String,
+        duration_ms: u64,
+        success: bool,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -72,6 +132,7 @@ pub struct SessionStore {
     current_path: RwLock<PathBuf>,
     current_id_cache: std::sync::RwLock<String>,
     turn_lock: Mutex<()>,
+    trace_lock: Mutex<()>,
 }
 
 impl SessionStore {
@@ -99,6 +160,7 @@ impl SessionStore {
             current_path: RwLock::new(current_path),
             current_id_cache: std::sync::RwLock::new(current_id),
             turn_lock: Mutex::new(()),
+            trace_lock: Mutex::new(()),
         }
     }
 
@@ -186,6 +248,82 @@ impl SessionStore {
             .await
             .with_context(|| format!("刷新会话文件失败: {}", path.display()))?;
         Ok(())
+    }
+
+    pub async fn append_trace(&self, record: &SessionTraceRecord) -> Result<()> {
+        let _guard = self.trace_lock.lock().await;
+        let path = self.trace_path_for_current().await;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("创建会话 trace 目录失败: {}", parent.display()))?;
+        }
+        let mut line = serde_json::to_vec(record).context("序列化会话 trace 失败")?;
+        line.push(b'\n');
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .with_context(|| format!("打开会话 trace 失败: {}", path.display()))?;
+        file.write_all(&line)
+            .await
+            .with_context(|| format!("追加会话 trace 失败: {}", path.display()))?;
+        file.flush()
+            .await
+            .with_context(|| format!("刷新会话 trace 失败: {}", path.display()))?;
+        Ok(())
+    }
+
+    pub async fn load_trace(&self) -> Result<Vec<SessionTraceRecord>> {
+        let path = self.trace_path_for_current().await;
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = tokio::fs::read(&path)
+            .await
+            .with_context(|| format!("读取会话 trace 失败: {}", path.display()))?;
+        let content = String::from_utf8_lossy(&bytes);
+        let lines = content.lines().collect::<Vec<_>>();
+        let has_complete_last_line = bytes.last().is_none_or(|byte| *byte == b'\n');
+        let mut records = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<SessionTraceRecord>(line) {
+                Ok(record) => records.push(record),
+                Err(_) if index + 1 == lines.len() && !has_complete_last_line => {
+                    warn!(
+                        line = index + 1,
+                        path = %path.display(),
+                        "忽略崩溃留下的不完整会话 trace 末行"
+                    );
+                    break;
+                }
+                Err(source) => {
+                    return Err(SessionError::CorruptTraceLine {
+                        line: index + 1,
+                        source,
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    async fn trace_path_for_current(&self) -> PathBuf {
+        let path = self.current_path.read().await;
+        Self::trace_path(&path)
+    }
+
+    fn trace_path(session_path: &Path) -> PathBuf {
+        let name = session_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("session.jsonl");
+        session_path.with_file_name(format!("{name}.trace"))
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
@@ -351,6 +489,7 @@ impl SessionStore {
             current_path: RwLock::new(current_path),
             current_id_cache: std::sync::RwLock::new(current_id),
             turn_lock: Mutex::new(()),
+            trace_lock: Mutex::new(()),
         }
     }
 
@@ -512,6 +651,34 @@ mod tests {
         assert_eq!(restored.len(), 2);
         assert_eq!(restored[0].content.as_deref(), Some("问题"));
         assert_eq!(restored[1].content.as_deref(), Some("回答"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn appends_and_restores_structured_trace_without_listing_it_as_a_session() {
+        let (store, path) = temp_session();
+        store
+            .append_trace(&SessionTraceRecord::TurnStarted {
+                timestamp_ms: 1_725_000_000_123,
+                request_id: "web-7".to_owned(),
+                input: "检查项目".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        let restored = store.load_trace().await.unwrap();
+        let sessions = store.list_sessions().await.unwrap();
+
+        assert_eq!(restored.len(), 1);
+        assert!(matches!(
+            &restored[0],
+            SessionTraceRecord::TurnStarted { request_id, .. } if request_id == "web-7"
+        ));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, path.file_name().unwrap().to_string_lossy());
+
+        let trace_path = SessionStore::trace_path(&path);
+        let _ = std::fs::remove_file(trace_path);
         let _ = std::fs::remove_file(path);
     }
 

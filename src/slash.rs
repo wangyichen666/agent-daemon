@@ -16,6 +16,8 @@ pub enum SlashAction {
     Skill,
     Cron,
     Mcp,
+    Dogfood,
+    Web,
 }
 
 #[derive(Clone, Copy)]
@@ -30,7 +32,7 @@ pub struct SlashCommand {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
     pub help: &'static str,
-    usage: &'static str,
+    pub usage: &'static str,
     args: ArgSpec,
     action: SlashAction,
 }
@@ -117,6 +119,22 @@ const COMMANDS: &[SlashCommand] = &[
         action: SlashAction::Ping,
     },
     SlashCommand {
+        name: "dogfood",
+        aliases: &[],
+        help: "导出当前 session 的完整对话与链路日志",
+        usage: "/dogfood",
+        args: ArgSpec::None,
+        action: SlashAction::Dogfood,
+    },
+    SlashCommand {
+        name: "web",
+        aliases: &[],
+        help: "启动或打开本地 Web 控制台",
+        usage: "/web",
+        args: ArgSpec::None,
+        action: SlashAction::Web,
+    },
+    SlashCommand {
         name: "exit",
         aliases: &["quit"],
         help: "断开并退出当前交互入口",
@@ -133,9 +151,29 @@ impl SlashRegistry {
         Self
     }
 
-    #[cfg(test)]
     pub fn commands(&self) -> &'static [SlashCommand] {
         COMMANDS
+    }
+
+    pub fn suggestions(&self, input: &str) -> Vec<&'static SlashCommand> {
+        let input = input.trim_start();
+        let Some(query) = input.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if query.chars().any(char::is_whitespace) {
+            return Vec::new();
+        }
+        let query = query.to_ascii_lowercase();
+        self.commands()
+            .iter()
+            .filter(|command| {
+                command.name.starts_with(&query)
+                    || command
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.starts_with(&query))
+            })
+            .collect()
     }
 
     pub fn parse(&self, input: &str) -> SlashParse {
@@ -201,6 +239,23 @@ impl SlashRegistry {
     }
 }
 
+impl SlashCommand {
+    pub fn completion(&self) -> String {
+        format!("/{}", self.name)
+    }
+
+    pub fn matches_exact(&self, input: &str) -> bool {
+        let Some(name) = input.trim().strip_prefix('/') else {
+            return false;
+        };
+        self.name.eq_ignore_ascii_case(name)
+            || self
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlashInvocation {
     pub action: SlashAction,
@@ -250,6 +305,13 @@ mod tests {
             SlashParse::Error(_)
         ));
         assert!(matches!(registry.parse("hello"), SlashParse::NotCommand));
+        assert_eq!(
+            registry.parse(" /DOGFOOD "),
+            SlashParse::Command(SlashInvocation {
+                action: SlashAction::Dogfood,
+                args: Vec::new(),
+            })
+        );
     }
 
     #[test]
@@ -260,5 +322,17 @@ mod tests {
             assert!(help.contains(command.usage));
         }
         assert!(help.contains("/ping"));
+        assert!(help.contains("/dogfood"));
+    }
+
+    #[test]
+    fn suggests_all_commands_for_slash_and_filters_by_prefix() {
+        let registry = SlashRegistry::builtin();
+        assert_eq!(registry.suggestions("/").len(), registry.commands().len());
+        let matches = registry.suggestions("/do");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "dogfood");
+        assert!(registry.suggestions("/resume ").is_empty());
+        assert!(registry.suggestions("hello").is_empty());
     }
 }

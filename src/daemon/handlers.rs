@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use serde::Deserialize;
@@ -85,6 +87,13 @@ impl DaemonState {
             "session.resume" => {
                 let result = match parse_params::<SessionResumeParams>(&request.params) {
                     Ok(params) => self.session_resume(&params.session_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.trace" => {
+                let result = match parse_params::<SessionResumeParams>(&request.params) {
+                    Ok(params) => self.session_trace(&params.session_id).await,
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -199,6 +208,7 @@ impl DaemonState {
 
         let (agent_events, mut event_receiver) = mpsc::unbounded_channel();
         let (approval_events, mut approval_receiver) = mpsc::unbounded_channel();
+        let trace_request_id = request_id_label(&request.id);
         let turn_span = info_span!(
             "agent_turn",
             session_id = %session_id,
@@ -214,11 +224,12 @@ impl DaemonState {
                     let mut history = session.history.lock().await;
                     session
                         .engine
-                        .run_turn_with_events(
+                        .run_turn_with_events_for_request(
                             &mut history,
                             params.message,
                             Some(agent_events),
                             cancellation,
+                            Some(trace_request_id),
                         )
                         .await
                 },
@@ -417,6 +428,19 @@ impl DaemonState {
         Ok(json!({"sessions": self.session_infos().await?}))
     }
 
+    async fn session_trace(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        let runtime = self.session_runtime(Some(session_id)).await?;
+        let records = runtime
+            .store
+            .load_trace()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        Ok(json!({
+            "session_id": session_id,
+            "records": records,
+        }))
+    }
+
     async fn session_infos(&self) -> Result<Vec<crate::session::SessionInfo>, (i64, String)> {
         let mut sessions = self
             .session
@@ -596,11 +620,34 @@ impl DaemonState {
                 SlashAction::Ping => SlashResponse::Text {
                     content: "pong".to_owned(),
                 },
+                SlashAction::Dogfood => self.execute_dogfood(session_id).await?,
+                SlashAction::Web => SlashResponse::Text {
+                    content: "请在 TUI 中使用 /web，或运行 `my-agent serve`。".to_owned(),
+                },
                 SlashAction::Exit => SlashResponse::Exit,
             },
         };
         serde_json::to_value(response)
             .map_err(|error| (INTERNAL_ERROR, format!("序列化 slash 响应失败：{error}")))
+    }
+
+    async fn execute_dogfood(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<SlashResponse, (i64, String)> {
+        let runtime = self.session_runtime(session_id).await?;
+        let session_path = runtime.store.path_for_session(&runtime.id);
+        let dogfood_path = export_dogfood_file(&runtime.id, &session_path, &self.daemon_log_path)
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("生成 dogfood 日志失败：{error:#}")))?;
+        info!(
+            session_id = %runtime.id,
+            dogfood_path = %dogfood_path.display(),
+            "已导出 dogfood 日志"
+        );
+        Ok(SlashResponse::Text {
+            content: format!("dogfood 已生成：{}", dogfood_path.display()),
+        })
     }
 
     async fn execute_skill_command(&self, args: &[String]) -> SlashResponse {
@@ -976,8 +1023,129 @@ fn format_mcp_status(status: &crate::mcp::McpStatus, include_errors: bool) -> St
     }
 }
 
+async fn export_dogfood_file(
+    session_id: &str,
+    session_path: &Path,
+    daemon_log_path: &Path,
+) -> anyhow::Result<PathBuf> {
+    let session_bytes = match tokio::fs::read(session_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 session 文件失败: {}", session_path.display()));
+        }
+    };
+    let daemon_bytes = match tokio::fs::read(daemon_log_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 daemon 日志失败: {}", daemon_log_path.display()));
+        }
+    };
+    let session_content = String::from_utf8_lossy(&session_bytes);
+    let daemon_content = String::from_utf8_lossy(&daemon_bytes);
+    let session_marker = format!("session_id={session_id}");
+    let quoted_session_marker = format!("session_id=\"{session_id}\"");
+    let chain_logs = daemon_content
+        .lines()
+        // tracing-subscriber may decorate field names and `=` separately, for example
+        // `\x1b[3msession_id\x1b[0m\x1b[2m=\x1b[0msession-...`. Match against a
+        // plain-text copy so dogfood exports work whether ANSI colors are enabled or not.
+        .map(strip_ansi_sequences)
+        .filter(|line| line.contains(&session_marker) || line.contains(&quoted_session_marker))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message_count = session_content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let chain_log_count = chain_logs.lines().count();
+    let generated_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("系统时间早于 UNIX_EPOCH")?
+        .as_millis();
+    let session_directory = session_path.parent().unwrap_or_else(|| Path::new("."));
+    tokio::fs::create_dir_all(session_directory)
+        .await
+        .with_context(|| format!("创建 session 目录失败: {}", session_directory.display()))?;
+    let session_stem = session_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session");
+    let dogfood_path = session_directory.join(format!("dogfood-{session_stem}.log"));
+    let mut output = format!(
+        "# my-agent dogfood export\n\
+schema_version=1\n\
+generated_at_unix_ms={generated_at_ms}\n\
+session_id={session_id}\n\
+session_file={}\n\
+daemon_log_file={}\n\
+conversation_messages={message_count}\n\
+chain_log_lines={chain_log_count}\n\n\
+===== LLM / REACT CONVERSATION (RAW SESSION JSONL) =====\n",
+        session_path.display(),
+        daemon_log_path.display(),
+    );
+    if session_content.is_empty() {
+        output.push_str("(当前 session 尚无持久化消息)\n");
+    } else {
+        output.push_str(&session_content);
+        if !session_content.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    output.push_str("\n===== DAEMON CHAIN LOG (CURRENT SESSION ONLY) =====\n");
+    if chain_logs.is_empty() {
+        output.push_str("(未找到带当前 session_id 的 daemon 链路日志)\n");
+    } else {
+        output.push_str(&chain_logs);
+        output.push('\n');
+    }
+    tokio::fs::write(&dogfood_path, output)
+        .await
+        .with_context(|| format!("写入 dogfood 文件失败: {}", dogfood_path.display()))?;
+    tokio::fs::canonicalize(&dogfood_path)
+        .await
+        .with_context(|| format!("解析 dogfood 文件路径失败: {}", dogfood_path.display()))
+}
+
+fn strip_ansi_sequences(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut plain_start = 0;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == 0x1b && bytes.get(cursor + 1) == Some(&b'[') {
+            output.push_str(&input[plain_start..cursor]);
+            cursor += 2;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                cursor += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            plain_start = cursor;
+        } else {
+            cursor += 1;
+        }
+    }
+    output.push_str(&input[plain_start..]);
+    output
+}
+
 fn parse_params<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, String> {
     serde_json::from_value(params.clone()).map_err(|error| format!("参数无效: {error}"))
+}
+
+fn request_id_label(request_id: &RequestId) -> String {
+    match request_id {
+        RequestId::Number(value) => value.to_string(),
+        RequestId::String(value) => value.clone(),
+    }
 }
 
 fn send_result(
@@ -1042,4 +1210,58 @@ fn is_resolved_approval(update: &ActiveRequestUpdate, pending_ids: &HashSet<Stri
     data["approval"]["id"]
         .as_str()
         .is_some_and(|id| !pending_ids.contains(id))
+}
+
+#[cfg(test)]
+mod dogfood_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::export_dogfood_file;
+
+    static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
+
+    #[tokio::test]
+    async fn exports_full_conversation_and_only_current_session_chain_logs() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let directory =
+            std::env::temp_dir().join(format!("my-agent-dogfood-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "session-42.jsonl";
+        let session_path = directory.join(session_id);
+        let daemon_log_path = directory.join("daemon.log");
+        let conversation = concat!(
+            "{\"role\":\"user\",\"content\":\"检查项目\"}\n",
+            "{\"role\":\"assistant\",\"tool_calls\":[{\"name\":\"exec\",\"arguments\":{\"command\":\"pwd\"}}]}\n",
+            "{\"role\":\"tool\",\"content\":\"/workspace\",\"name\":\"exec\"}\n",
+            "{\"role\":\"assistant\",\"content\":\"完成\"}\n",
+        );
+        std::fs::write(&session_path, conversation).unwrap();
+        std::fs::write(
+            &daemon_log_path,
+            concat!(
+                "\x1b[32m INFO\x1b[0m agent_turn{\x1b[3msession_id\x1b[0m\x1b[2m=\x1b[0msession-42.jsonl request_id=Number(7)}: 开始 ReAct 轮次\n",
+                "INFO agent_turn{session_id=other.jsonl request_id=Number(8)}: 其他会话\n",
+                "INFO session_id=session-42.jsonl request_id=Number(7): chat 请求结束\n",
+            ),
+        )
+        .unwrap();
+
+        let exported = export_dogfood_file(session_id, &session_path, &daemon_log_path)
+            .await
+            .unwrap();
+        let content = std::fs::read_to_string(&exported).unwrap();
+
+        assert_eq!(
+            exported.file_name().and_then(|value| value.to_str()),
+            Some("dogfood-session-42.log")
+        );
+        assert!(content.contains("conversation_messages=4"));
+        assert!(content.contains("chain_log_lines=2"));
+        assert!(content.contains(conversation));
+        assert!(content.contains("request_id=Number(7)"));
+        assert!(!content.contains("其他会话"));
+        assert!(!content.contains('\x1b'));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

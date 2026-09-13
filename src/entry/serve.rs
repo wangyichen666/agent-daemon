@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -29,7 +30,12 @@ struct ApiState {
     client: DaemonClient,
     model: String,
     bearer_token: Option<String>,
+    workspace: PathBuf,
 }
+
+const WEB_INDEX: &str = include_str!("../../web/index.html");
+const WEB_APP: &str = include_str!("../../web/app.js");
+const WEB_STYLES: &str = include_str!("../../web/styles.css");
 
 #[derive(Deserialize)]
 struct ChatCompletionRequest {
@@ -58,31 +64,77 @@ pub async fn run_http_server(
     address: SocketAddr,
     model: String,
     bearer_token: Option<String>,
+    workspace: PathBuf,
 ) -> Result<()> {
     let state = ApiState {
         client,
         model,
         bearer_token,
+        workspace,
     };
+    let daemon_watch = state.client.clone();
     let app = api_router(state);
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("监听本地 API 失败: {address}"))?;
     println!("my-agent 本地 API 正在监听 http://{address}");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = wait_for_daemon_disconnect(daemon_watch) => {}
+            }
         })
         .await
         .context("本地 API 服务异常退出")
 }
 
+async fn wait_for_daemon_disconnect(client: DaemonClient) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if crate::entry::cli::request_result(&client, "session.list", json!({}))
+            .await
+            .is_err()
+        {
+            tracing::info!("daemon 已断开，Web 服务随之退出");
+            return;
+        }
+    }
+}
+
 fn api_router(state: ApiState) -> Router {
     Router::new()
+        .route("/", get(web_index))
+        .route("/app.js", get(web_app))
+        .route("/styles.css", get(web_styles))
         .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/ws", get(websocket_upgrade))
         .with_state(state)
+}
+
+async fn web_index() -> Response {
+    static_asset("text/html; charset=utf-8", WEB_INDEX)
+}
+
+async fn web_app() -> Response {
+    static_asset("text/javascript; charset=utf-8", WEB_APP)
+}
+
+async fn web_styles() -> Response {
+    static_asset("text/css; charset=utf-8", WEB_STYLES)
+}
+
+fn static_asset(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn websocket_upgrade(State(state): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
@@ -349,10 +401,21 @@ async fn health(State(state): State<ApiState>, headers: HeaderMap) -> Response {
         return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
     }
     match crate::entry::cli::request_result(&state.client, "session.load", json!({})).await {
-        Ok(_) => Json(json!({"status": "ok", "daemon": "ready"})).into_response(),
+        Ok(_) => Json(json!({
+            "status": "ok",
+            "daemon": "ready",
+            "workspace": state.workspace,
+            "model": state.model,
+        }))
+        .into_response(),
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "error", "error": error.to_string()})),
+            Json(json!({
+                "status": "error",
+                "error": error.to_string(),
+                "workspace": state.workspace,
+                "model": state.model,
+            })),
         )
             .into_response(),
     }
@@ -719,6 +782,7 @@ mod tests {
                 client: InMemoryServer::start(daemon),
                 model: "test-model".to_owned(),
                 bearer_token: Some("test-token".to_owned()),
+                workspace: std::env::current_dir().expect("测试工作区应存在"),
             },
             session_path,
         )
@@ -749,6 +813,24 @@ mod tests {
             extract_latest_user_prompt(&messages).as_deref(),
             Some("第一段\n第二段")
         );
+    }
+
+    #[tokio::test]
+    async fn embeds_the_web_console_assets() {
+        let index = web_index().await;
+        assert_eq!(index.status(), StatusCode::OK);
+        assert_eq!(
+            index.headers()[axum::http::header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(index.into_body(), usize::MAX)
+            .await
+            .expect("首页 body 应可读取");
+        let html = String::from_utf8(body.to_vec()).expect("首页应为 UTF-8");
+        assert!(html.contains("my-agent · 本地控制台"));
+        assert!(html.contains("id=\"session-list\""));
+        assert!(WEB_APP.contains("session.trace"));
+        assert!(WEB_STYLES.contains(".workspace-grid"));
     }
 
     #[test]

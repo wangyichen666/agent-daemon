@@ -6,6 +6,7 @@ pub mod runtime;
 pub mod server;
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -31,6 +32,7 @@ pub struct DaemonState {
     pub(crate) skills: Option<SkillLibrary>,
     pub(crate) cron: Option<Arc<CronManager>>,
     pub(crate) mcp: Option<Arc<McpManager>>,
+    pub(crate) daemon_log_path: PathBuf,
 }
 
 pub(crate) struct SessionRuntime {
@@ -144,6 +146,7 @@ impl DaemonState {
         Self::new_with_services(engine, history, session, approvals, skills, None, None)
     }
 
+    #[cfg(test)]
     pub fn new_with_services(
         engine: Arc<LoopEngine>,
         history: Vec<Message>,
@@ -152,6 +155,32 @@ impl DaemonState {
         skills: Option<SkillLibrary>,
         cron: Option<Arc<CronManager>>,
         mcp: Option<Arc<McpManager>>,
+    ) -> Self {
+        let daemon_log_path = session
+            .path_for_session(&session.current_id_sync())
+            .with_file_name("daemon.log");
+        Self::new_with_services_and_log_path(
+            engine,
+            history,
+            session,
+            approvals,
+            skills,
+            cron,
+            mcp,
+            daemon_log_path,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_services_and_log_path(
+        engine: Arc<LoopEngine>,
+        history: Vec<Message>,
+        session: Arc<SessionStore>,
+        approvals: ApprovalBroker,
+        skills: Option<SkillLibrary>,
+        cron: Option<Arc<CronManager>>,
+        mcp: Option<Arc<McpManager>>,
+        daemon_log_path: PathBuf,
     ) -> Self {
         let default_session_id = session.current_id_sync();
         let default_session = Arc::new(SessionRuntime {
@@ -171,6 +200,7 @@ impl DaemonState {
             skills,
             cron,
             mcp,
+            daemon_log_path,
         }
     }
 

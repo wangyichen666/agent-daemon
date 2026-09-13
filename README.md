@@ -50,8 +50,10 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 
 - 层级化 transcript、CJK 安全编辑、多行输入、历史草稿和发送队列。
 - 工具调用默认聚合；`Ctrl+T` 锚定最近一条原 Query，在原对话中内联展开详情。
+- 输入 `/` 实时显示内置命令及简介；继续输入可按前缀过滤，`↑/↓` 选择、`Tab` 补全。
 - 模型等待、流式输出、工具执行期间持续显示不确定进度动画。
 - 审批、完成、失败、取消和连接中断都有明确终态；滚离底部时提示新消息。
+- 页眉持续显示本地 Web 地址；`/web` 幂等启动或复用控制台并打开默认浏览器。
 - `Ctrl+/` 查看快捷键，`Ctrl+C` 取消当前请求，`/resume` 恢复历史会话。
 
 ## 核心能力
@@ -67,7 +69,8 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 | **Cron / Heartbeat** | interval/五段 cron、独立 session、有限指数退避、无人值守安全拒绝；heartbeat 不调用模型。 |
 | **MCP stdio** | 本地 server 握手、工具发现、动态桥接、默认审批、错误隔离和子进程清理。 |
 | **多窗口隔离** | 每个 TUI/REPL/ACP 窗口拥有独立 session；历史、活动请求、审批、取消和订阅互不串线。 |
-| **可观测性** | round、Provider 首增量/总耗时、工具耗时与成功状态关联 `session_id/request_id` 写入工作区日志。 |
+| **Web 控制台** | 同源页面可调用 Agent、搜索全部本地 Session，并查看消息、完整 LM 输入/响应、工具参数/输出和毫秒级时间链路。 |
+| **可观测性** | 每 Session 的结构化 `.trace` 与 daemon 日志同时保留 round、Provider 首增量/总耗时、工具耗时及 `session_id/request_id` 关联。 |
 
 ## 系统如何工作
 
@@ -76,7 +79,7 @@ flowchart TB
     subgraph Entry[四类交互入口]
         TUI[全屏 TUI]
         CLI[CLI / REPL]
-        API[HTTP + SSE / WebSocket]
+        API[Web 控制台 + HTTP/SSE/WS]
         ACP[ACP v1 stdio]
     end
 
@@ -165,7 +168,7 @@ my-agent
 | `my-agent` / `my-agent tui` | 启动全屏终端界面。 |
 | `my-agent chat` | 启动普通 REPL。 |
 | `my-agent chat "检查项目"` | 发起一次性请求。 |
-| `my-agent serve --bind 127.0.0.1:8787` | 提供 OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
+| `my-agent serve --bind 127.0.0.1:8787` | 提供 Web 控制台、OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
 | `my-agent editor` | 启动标准 ACP v1 stdio server。 |
 | `my-agent status` | 查看当前工作区 daemon 与日志路径。 |
 | `my-agent sessions` | 列出稳定 session、摘要和运行状态。 |
@@ -178,8 +181,12 @@ my-agent
 ```text
 /help      /status    /sessions   /resume [编号|ID]
 /new       /cancel    /skill      /cron
-/mcp       /ping      /exit
+/mcp       /ping      /dogfood    /web       /exit
 ```
+
+在 TUI 输入 `/dogfood` 会在 session 文件所在目录生成 `dogfood-<session>.log`，其中包含当前 session 的原始 LLM/ReAct 对话（用户消息、助手回复、工具调用参数和工具输出），以及按 `session_id` 筛选的 daemon 全链路日志。TUI 只显示生成文件的绝对路径，不把日志正文塞入对话区。
+
+在 TUI 输入 `/web`：若控制台尚未启动，会在 `MY_AGENT_WEB_ADDR`（默认 `127.0.0.1:8787`）拉起同工作区 Web 服务；若已启动则直接复用。两种情况都会打开浏览器。页面左侧汇总 Web、TUI、CLI 与 ACP 产生的所有 Session，中间可继续对话，右侧展示结构化执行链路。
 
 <details>
 <summary><strong>HTTP / SSE / WebSocket 示例</strong></summary>
@@ -273,6 +280,7 @@ MCP server 以当前用户权限运行，只应连接可信本地配置。图片
 | `MULTIMODAL_ENABLED` | 按模型名检测 | 显式开启/关闭图片内容块。 |
 | `SKILLS_DIR` | `.my-agent/skills` | 本地 Skill 目录。 |
 | `MY_AGENT_API_TOKEN` | 未设置 | 非回环 HTTP/WebSocket 的 Bearer Token。 |
+| `MY_AGENT_WEB_ADDR` | `127.0.0.1:8787` | TUI `/web` 使用的本地控制台地址；自动启动仅允许回环地址。 |
 | `MY_AGENT_TUI_THEME` | `terminal` | `terminal`、`dark` 或 `light`。 |
 | `MY_AGENT_TUI_MOUSE` | 未设置 | 设为 `1` 时捕获鼠标滚轮。 |
 | `MY_AGENT_EXEC_TIMEOUT_SECS` | `300` | `exec` 单次最长运行秒数。 |
@@ -289,13 +297,13 @@ MCP server 以当前用户权限运行，只应连接可信本地配置。图片
 src/main.rs                Clap 子命令与启动分发
 src/client.rs              Unix / 内存 DaemonClient
 src/daemon/                状态、协议、审批、运行时、生命周期、server
-src/entry/                 TUI、CLI、HTTP/WS、ACP 与恢复适配
+src/entry/                 TUI、CLI、Web/HTTP/WS、ACP 与恢复适配
 src/provider.rs            Provider 公共契约与 execution identity
 src/provider/              OpenAI、Anthropic、Ollama 适配器
 src/tool_calls.rs          canonical tool-call assembler
 src/loop_engine.rs         ReAct、取消、并行波次、熔断与结果回填
 src/context.rs             上下文排序、Skill、估算与两级压缩
-src/session.rs             稳定 session 与 append-only JSONL
+src/session.rs             稳定 session、append-only JSONL 与结构化 trace
 src/memory.rs              TTL 长期记忆与关键词/bigram 召回
 src/plan.rs                原子持久化计划
 src/sub_agent.rs           隔离上下文的受限子 Agent
@@ -304,6 +312,7 @@ src/cron.rs                Cron、重试与 heartbeat
 src/mcp.rs                 MCP stdio 客户端与工具桥接
 src/safety.rs              路径与命令安全决策点
 src/tools/                 内置工具注册、校验与执行
+web/                       零构建依赖的本地 Web 控制台
 ```
 
 </details>

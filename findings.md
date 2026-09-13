@@ -383,3 +383,31 @@
 - 系统自带 `tidy` 版本过旧，按非 UTF-8/非 HTML5 语义解析中文与 `<header>` 等标签，产生误报；不作为本轮质量门禁。
 - 使用 `sips` 将 `docs/readme-hero.svg` 按原始 1200×420 比例渲染后复核：标题、副标题、装饰线和四项指标全部位于画布内，中文清晰，无裁切、重叠或越界。
 - 推送后 GitHub 仓库页已抓取到新版 README：中文定位、导航、核心能力、架构、快速开始和完整说明链接均来自最新提交。内置浏览器连续两次加载 GitHub 超时，因此不再重试；远端内容生效由 GitHub 页面抓取确认，视觉由本地原尺寸渲染确认。
+
+# 2026-09-13 本地 Agent Web 控制台
+
+- 仓库当前已有未提交改动，集中在 dogfood 日志导出、共享 slash/TUI 补全和 daemon 辅助能力；本轮必须在这些改动之上增量开发。
+- 项目已存在本地 HTTP API、WebSocket 私有 RPC、独立 Session JSONL、daemon 日志和 TUI slash 注册表，可作为 Web 控制台地基。
+- 当前尚未确认 HTTP 服务是否随 daemon 默认启动、Session JSONL 是否带逐消息时间，以及浏览器打开逻辑的现有实现；阶段 0 将据源码确定。
+- `my-agent serve` 目前是独立前台进程：先确保 daemon，再监听 `127.0.0.1:8787`；daemon 自身只监听 Unix socket，因而 `/web` 需要单独管理 Web 进程的幂等生命周期。
+- 现有 HTTP Router 只有 `/health`、OpenAI 兼容 `/v1/chat/completions` 和 `/ws`，WebSocket 已能透传任意 daemon JSON-RPC，并带 connect 鉴权与活动请求恢复。
+- daemon ready marker 只记录 daemon PID/版本/工作区；RuntimePaths 尚无 Web PID/ready 信息。现有依赖中未发现浏览器打开 crate 或系统 `open` 封装。
+- 当前工作树的 dogfood 能导出原始 Session JSONL 与按 session_id 过滤的 daemon 日志，这与 Web 详情需求互补，但不应要求前端解析纯文本导出。
+- `Message` 目前仅持久化 role/content/tool_calls/tool_call_id/name/image_urls，没有 created_at、request_id 或 round；文件 mtime 只能给出 Session 级更新时间，无法还原每条历史消息的精确时间。
+- `session.load` 已支持传入 session_id 且从 append-only 文件即时读取，`session.list` 已返回状态、活动请求数、消息数、预览和更新时间；Web Session 浏览器可直接基于这两个 RPC，无需切换 daemon 的 legacy/current session。
+- `chat.send` 可显式传 session_id，事件已包含 turn/tool 阶段耗时，daemon 日志包含 request/session、轮次、Provider 和工具 telemetry；但网页若只靠现有 snapshot，历史链路无法结构化关联。
+- Provider 出站消息由各 wire adapter 手动构造，因此可以给本地 `Message` 增加 `#[serde(default)]` 的审计元数据而不污染发给模型的 wire payload；旧 JSONL 可保持向后兼容。
+- TUI 的 slash 输入最终集中到 `submit_input`/daemon `slash.execute`；浏览器启动属于入口本地副作用，更适合由 TUI 在识别 `/web` 后调用共享 Web 生命周期 helper，而不是让 daemon 执行桌面打开动作。
+- Trace 设计确定为 `session-….jsonl.trace`，避免被现有 `is_session_name` 规则误识别成会话；记录类型覆盖 turn/model/tool 的 start/finish，并以 request_id、round 和毫秒时间关联。
+- Web UI 可完全通过既有同源 `/ws` 调用 `session.new/list/load`、`chat.send`、审批和取消；只需新增 `session.trace` RPC，不需要复制一套 REST 会话协议。
+- TUI 页眉第二行有稳定空间显示 `/web` 与默认地址；`TuiState` 已保存 workspace 字符串，入口可复用它调用 Web launcher。
+- `DaemonClient` 克隆共享同一个 Unix transport，Web 健康轮询可安全复用 clone；daemon 断开时所有 pending 请求会收到明确的 -32000 终态。
+- `my-agent stop` 会让现有 `serve` 进程失去 daemon，但当前 HTTP server 只监听 Ctrl-C，不会自动退出；需要为 Web server 增加 daemon 连接存活监视，避免留下占用 8787 的僵尸前端。
+- 现有 Session 测试都使用独立临时文件并显式清理，trace 回归应同时清理 `.trace` 文件，确保列表逻辑不会把 trace 当成 Session。
+- Web server 现在可每秒探测 daemon；daemon 断开时会优雅退出并释放端口。launcher 能区分健康服务、同工作区正在退出的旧服务、无服务以及被其他工作区占用四种状态。
+- 定向回归确认 `session.trace` 返回 turn → 完整 model request → 完整 model response → turn completed，并且 TUI 的 21 项交互/渲染测试在增加 Web 地址和 `/web` 后全部通过。
+- 静态前端不需要额外 crate 或 npm：HTML/CSS/JS 由 `include_str!` 嵌入二进制，调用同源 WebSocket，支持新建/选择 Session、流式对话、审批、取消、搜索和链路筛选。
+- 隔离进程浏览器验收通过：页面自动连上 daemon、能新建 Session；用不可达的本地 Ollama 端点触发失败后，UI 清晰展示用户输入、失败 toast，以及 turn/model request/model response/turn failed 共 4 条 trace。
+- 浏览器可访问性树确认链路记录含精确毫秒时间、provider、完整消息数/工具数、首字延迟入口与可展开 payload；浏览器控制台无 error/warning。
+- 840px 视口下采用双栏对话 + 下方链路面板，完整页面可滚动；大屏使用三栏。移动端不再隐藏 Session，而是纵向排列，功能仍可达。
+- 隔离 TUI 实测页眉显示 `Web http://127.0.0.1:18787 · /web 打开`；输入 `/web` 返回“已在运行，已打开”，进程检查确认仍只有一个 serve 实例。

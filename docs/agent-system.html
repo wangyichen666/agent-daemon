@@ -578,7 +578,7 @@
     <div class="eyebrow">Rust · Personal Coding Agent</div>
     <h1>一个请求，如何变成一次可靠的代码行动</h1>
     <p class="lead">
-      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。全屏 TUI、CLI、本地 HTTP/WebSocket API 与标准 ACP
+      my-agent 是一个单用户、daemon 驱动的 AI 编码 Agent。全屏 TUI、本地 Web 控制台、CLI、HTTP/WebSocket API 与标准 ACP
       stdio 入口连接同一个后台运行时；请求进入后再恢复记忆、组装上下文、规划、调用工具
       或委派子 Agent，最后把同一份事件流和可核验结果返回给调用端。
     </p>
@@ -632,17 +632,22 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>四类入口对等</h3>
-          <p>全屏 TUI、CLI、本地 OpenAI 兼容 HTTP/SSE + 全双工 WebSocket、标准 ACP v1 stdio 都复用同一 daemon。</p>
+          <p>全屏 TUI、带 Session/链路浏览器的 Web 控制台、CLI、本地 OpenAI 兼容 HTTP/SSE + 全双工 WebSocket、标准 ACP v1 stdio 都复用同一 daemon。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>全屏终端 TUI</h3>
-          <p>直接运行 <code>myagent</code> 进入全屏界面：启动时显式清屏并从顶部连续排版；默认继承终端主题，也内置 dark/light 语义色板。Ctrl+T 会锚定最近一条原 Query，在当前对话中内联展开工具参数与输出；模型等待、流式输出和工具执行期间持续显示不确定进度动画，审批与终态立即停止。</p>
+          <p>直接运行 <code>myagent</code> 进入全屏界面：页眉显示本地 Web 地址，<code>/web</code> 会幂等启动或复用控制台并打开浏览器。界面默认继承终端主题，也内置 dark/light 语义色板；Ctrl+T 在原 Query 中内联展开工具细节，运行阶段持续显示不确定进度动画。</p>
+        </article>
+        <article class="panel status-card">
+          <span class="badge done">已实现</span>
+          <h3>本地 Web 控制台</h3>
+          <p>可调用同一 Agent、搜索全部本地 Session，并查看用户/助手/工具消息、完整 LM 输入与响应、工具参数与输出，以及毫秒级执行时间线。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>可观测与平滑升级</h3>
-          <p>每轮模型、首个增量、工具耗时与成功状态按 session/request 写入工作区日志；<code>status</code> / <code>logs</code> 无需模型配置即可排障。ready 标记记录可执行文件指纹，新版本会优雅切换旧 daemon。</p>
+          <p>每轮完整 LM 输入/响应、首个增量、工具参数/输出、耗时与成功状态按 session/request 写入结构化 session trace，同时保留工作区日志；<code>status</code> / <code>logs</code> 无需模型配置即可排障。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -983,13 +988,13 @@
         <article class="panel module-card"><h3><code>main.rs / config.rs</code></h3><p>Clap 子命令、工作区选择、配置聚合检查与首次使用引导。</p></article>
         <article class="panel module-card"><h3><code>daemon/</code></h3><p>DaemonState、协议 SSOT、handlers、审批、运行时装配、生命周期和 Unix socket server。</p></article>
         <article class="panel module-card"><h3><code>client.rs</code></h3><p>持久 Unix 连接、request id 多路复用，以及测试用内存回环传输。</p></article>
-        <article class="panel module-card"><h3><code>entry/</code></h3><p>全屏 TUI、CLI REPL、本地 HTTP/SSE + WebSocket 和标准 ACP stdio 入口；recovery helper 统一恢复逻辑。</p></article>
+        <article class="panel module-card"><h3><code>entry/ + web/</code></h3><p>全屏 TUI、CLI REPL、本地 Web/HTTP/SSE + WebSocket 和标准 ACP stdio 入口；零构建依赖页面直接嵌入二进制。</p></article>
         <article class="panel module-card"><h3><code>provider.rs / provider/</code></h3><p>统一 Provider 契约、execution identity，以及 OpenAI、Anthropic、Ollama 的协议适配。</p></article>
         <article class="panel module-card"><h3><code>cron.rs / mcp.rs</code></h3><p>持久化本地调度与 heartbeat；自研 MCP stdio JSON-RPC、工具桥接、安全审批和子进程生命周期。</p></article>
         <article class="panel module-card"><h3><code>loop_engine.rs</code></h3><p>ReAct while 循环、长任务进度检查、无进展熔断、并行波次、工具结果回填与最终终止判断。</p></article>
         <article class="panel module-card"><h3><code>context.rs</code></h3><p>上下文排序、项目规则、动态环境、token 估算、分块总结与递归压缩。</p></article>
         <article class="panel module-card"><h3><code>safety.rs</code></h3><p>所有文件路径和命令的单一安全决策点；审批由 daemon 中介挂起和恢复。</p></article>
-        <article class="panel module-card"><h3><code>session.rs</code></h3><p>稳定 ID 的独立 append-only JSONL、当前 session 指针、摘要列表、残缺末行恢复与 RAII turn 锁。</p></article>
+        <article class="panel module-card"><h3><code>session.rs</code></h3><p>稳定 ID 的独立 append-only JSONL、逐 session 结构化 trace、摘要列表、残缺末行恢复与 RAII turn 锁。</p></article>
         <article class="panel module-card"><h3><code>memory.rs</code></h3><p>长期记忆条目、有效期、关键词和中文 bigram 索引逻辑，以及两个记忆工具。</p></article>
         <article class="panel module-card"><h3><code>plan.rs</code></h3><p>任务步骤状态、原子 JSON 持久化、动态上下文块与 plan 工具。</p></article>
         <article class="panel module-card"><h3><code>sub_agent.rs</code></h3><p>复用 ReAct 核心，提供独立历史、工具子集、轮次预算和禁止递归的子 Agent。</p></article>
@@ -1035,6 +1040,7 @@
 <span class="prompt">$</span> ./target/release/my-agent
 <span class="prompt">&gt;</span> /resume
 <span class="prompt">&gt;</span> 1
+<span class="prompt">&gt;</span> /web
 
 <span class="comment"># 可选：仅在终端支持 truecolor 时启用内置深色主题</span>
 <span class="prompt">$</span> MY_AGENT_TUI_THEME=dark myagent
@@ -1052,9 +1058,9 @@
             <li>复杂任务可要求“先制定计划”；大范围调研可要求“交给子 Agent，只返回结论”。</li>
             <li>要求记忆时明确说“记住……”；需要偏好时可明确说“先回忆……”。</li>
             <li>可把工作方法写入 <code>.my-agent/skills/*.md</code>，标题使用一级标题，摘要使用 <code>summary:</code>。</li>
-            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、默认折叠的工具摘要、任务完成标记和 sticky-bottom 新消息提示。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+T 锚定本轮原 Query 并内联展开/收起工具细节，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；模型等待、流式输出、工具执行期间状态栏持续播放不确定进度动画，进入审批或终态后停止。按 Ctrl+/ 打开快捷键帮助（Mac 终端可用）。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
-            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；随后输入编号，或直接使用 <code>/resume &lt;session-id&gt;</code> 恢复。共享 Slash 命令还包括 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/skill</code>、<code>/cron</code>、<code>/mcp</code>、<code>/ping</code> 和 <code>/exit</code>。命令行可用 <code>myagent status</code> 查看 daemon 与日志路径，或用 <code>myagent logs --session ... --request ...</code> 精确过滤日志；这些诊断命令不需要模型环境变量。</li>
-            <li><code>serve</code> 同时提供 HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。</li>
+            <li>TUI 默认使用 <code>terminal</code> 主题并继承终端颜色；真彩终端可用 <code>MY_AGENT_TUI_THEME=dark|light myagent</code> 启用内置主题。对话区采用层级化 transcript、默认折叠的工具摘要、任务完成标记和 sticky-bottom 新消息提示。输入 <code>/</code> 会实时显示内置命令及简介，继续输入可按前缀过滤，使用上下方向键选择、Tab 补全。Enter 发送、Alt+Enter 换行，支持多行粘贴、CJK 光标编辑与单行历史；<code>PageUp/PageDown</code> 翻页，Ctrl+上下逐行、Ctrl+Home/End 首尾，Ctrl+T 锚定本轮原 Query 并内联展开/收起工具细节，Ctrl+K 清空队列，Ctrl-C 取消最近活动 turn；模型等待、流式输出、工具执行期间状态栏持续播放不确定进度动画，进入审批或终态后停止。按 Ctrl+/ 打开快捷键帮助（Mac 终端可用）。设 <code>MY_AGENT_TUI_MOUSE=1</code> 才捕获鼠标滚轮，Esc 关闭帮助、命令提示或退出；<code>exec</code> 工具默认 300 秒超时，可用 <code>MY_AGENT_EXEC_TIMEOUT_SECS</code> 调整，取消/超时会清理子进程组。</li>
+            <li>输入 <code>/resume</code> 查看带编号、消息数和首条问题摘要的历史 session；<code>/web</code> 在默认 <code>127.0.0.1:8787</code> 幂等启动/复用 Web 控制台并打开浏览器。共享 Slash 命令还包括 <code>/help</code>、<code>/status</code>、<code>/sessions</code>、<code>/new</code>、<code>/cancel</code>、<code>/skill</code>、<code>/cron</code>、<code>/mcp</code>、<code>/ping</code>、<code>/dogfood</code> 和 <code>/exit</code>。</li>
+            <li><code>serve</code> 同时提供 Web 页面、HTTP/SSE 与 <code>/ws</code>；WebSocket 首帧发送 <code>{"type":"connect","token":"..."}</code>，后续帧使用 JSON-RPC 2.0。可用 <code>MY_AGENT_WEB_ADDR</code> 调整 TUI <code>/web</code> 的回环监听地址。</li>
             <li>编辑器接入请选择标准 ACP v1；客户端断线后重新 <code>session/load</code>，再订阅快照中的活动请求即可恢复输出和审批。</li>
           </ol>
         </aside>
@@ -1071,7 +1077,7 @@
   </main>
 
   <footer class="footer">
-    <div class="shell">my-agent 当前实现说明 · 根据本仓库源码生成 · 更新于 2026-09-12</div>
+    <div class="shell">my-agent 当前实现说明 · 根据本仓库源码生成 · 更新于 2026-09-13</div>
   </footer>
 </body>
 </html>

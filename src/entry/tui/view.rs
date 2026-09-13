@@ -142,10 +142,25 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
             .min(content.height.saturating_sub(8))
             .max(4)
     };
+    let slash_suggestions = state.slash_suggestions();
+    let reserved_height = 2u16
+        .saturating_add(1)
+        .saturating_add(approval_height)
+        .saturating_add(input_height)
+        .saturating_add(2);
+    let slash_available = content.height.saturating_sub(reserved_height);
+    let slash_height = if slash_suggestions.is_empty() || slash_available < 3 {
+        0
+    } else {
+        (slash_suggestions.len() as u16 + 2)
+            .min(14)
+            .min(slash_available)
+    };
     let regions = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
         Constraint::Length(approval_height),
+        Constraint::Length(slash_height),
         Constraint::Length(input_height),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -170,7 +185,10 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
                 theme.text(workspace, theme.foreground),
                 theme.muted_text(format!("  ·  session {session_label}")),
             ]),
-            Line::from(theme.muted_text("对话 · 规划 · 工具执行   ·   Ctrl+/ 查看快捷键")),
+            Line::from(theme.muted_text(format!(
+                "Web {} · /web 打开   ·   Ctrl+/ 查看快捷键",
+                state.web_url
+            ))),
         ]),
         regions[0],
     );
@@ -285,7 +303,17 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         );
     }
 
-    let input_area = regions[3];
+    if slash_height > 0 {
+        render_slash_menu(
+            frame,
+            theme,
+            regions[3],
+            &slash_suggestions,
+            state.slash_selection,
+        );
+    }
+
+    let input_area = regions[4];
     let border_color = if !state.pending_approvals.is_empty() {
         theme.border
     } else {
@@ -345,7 +373,9 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
         ));
     }
     let status = status_line(state, theme, width);
-    let footer = if width >= 90 {
+    let footer = if !slash_suggestions.is_empty() {
+        "↑/↓ 选择命令 · Tab/Enter 补全 · 完整命令 Enter 执行 · Esc 关闭".to_owned()
+    } else if width >= 90 {
         "Enter 发送 · Alt↵ 换行 · PgUp/Dn 翻页 · Ctrl+↑↓ 滚动 · Ctrl+End 回底 · Ctrl+/ 帮助 · Esc 退出"
             .to_owned()
     } else if width >= 55 {
@@ -355,16 +385,73 @@ pub(super) fn draw_ui(frame: &mut Frame<'_>, state: &mut TuiState) {
     };
     frame.render_widget(
         Paragraph::new(status).style(theme.muted_style()),
-        regions[4],
+        regions[5],
     );
     frame.render_widget(
         Paragraph::new(footer).style(theme.muted_style()),
-        regions[5],
+        regions[6],
     );
 
     if state.show_help {
         render_help(frame, state, theme, content);
     }
+}
+
+fn render_slash_menu(
+    frame: &mut Frame<'_>,
+    theme: Theme,
+    area: Rect,
+    suggestions: &[&crate::slash::SlashCommand],
+    selection: usize,
+) {
+    let visible_rows = usize::from(area.height.saturating_sub(2));
+    if visible_rows == 0 || suggestions.is_empty() {
+        return;
+    }
+    let selection = selection.min(suggestions.len() - 1);
+    let start = selection
+        .saturating_add(1)
+        .saturating_sub(visible_rows)
+        .min(suggestions.len().saturating_sub(visible_rows));
+    let usage_width = suggestions
+        .iter()
+        .map(|command| command.usage.width())
+        .max()
+        .unwrap_or(0)
+        .min(30)
+        + 2;
+    let lines = suggestions
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_rows)
+        .map(|(index, command)| {
+            let selected = index == selection;
+            let marker = if selected { "› " } else { "  " };
+            let command_style = if selected {
+                theme.style(theme.info).add_modifier(Modifier::BOLD)
+            } else {
+                theme.style(theme.foreground)
+            };
+            Line::from(vec![
+                Span::styled(marker, command_style),
+                Span::styled(format!("{:<usage_width$}", command.usage), command_style),
+                Span::styled(command.help.to_owned(), theme.muted_style()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.style(theme.foreground))
+            .block(
+                Block::default()
+                    .title(" 内置命令 · ↑↓ 选择 · Tab 补全 ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(theme.style(theme.info)),
+            ),
+        area,
+    );
 }
 
 fn status_line(state: &TuiState, theme: Theme, width: u16) -> Line<'static> {
@@ -448,6 +535,7 @@ fn render_help(frame: &mut Frame<'_>, state: &TuiState, theme: Theme, content: R
         Line::from("Ctrl+T       展开/收起工具调用与输出（默认折叠）"),
         Line::from("Ctrl+K       清空排队消息"),
         Line::from("Ctrl+C       取消当前请求"),
+        Line::from("/            显示内置命令；↑↓ 选择，Tab 补全"),
         Line::from("Ctrl+/       打开/关闭帮助"),
         Line::from("Esc          关闭帮助 / 退出"),
         Line::from(""),
@@ -870,6 +958,28 @@ mod tests {
                 .replace(' ', "")
                 .contains("最后一行")
         );
+    }
+
+    #[test]
+    fn renders_all_slash_commands_and_filters_them_by_prefix() {
+        let mut state = fixture();
+        state.input.replace("/");
+        let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        let all = buffer_text(terminal.backend().buffer());
+        let all_compact = all.replace(' ', "");
+        assert!(all_compact.contains("内置命令"));
+        assert!(all_compact.contains("/help"));
+        assert!(all_compact.contains("查看命令"));
+        assert!(all_compact.contains("/dogfood"));
+        assert!(all_compact.contains("导出当前session"));
+
+        state.input.replace("/do");
+        terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();
+        let filtered = buffer_text(terminal.backend().buffer());
+        let filtered_compact = filtered.replace(' ', "");
+        assert!(filtered_compact.contains("/dogfood"));
+        assert!(!filtered_compact.contains("/help"));
     }
 
     #[test]

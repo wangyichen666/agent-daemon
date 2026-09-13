@@ -187,3 +187,20 @@
 - 文档提交 `b455ed6` 已推送到 `origin/main`；GitHub 仓库页已读取到新版 README。内置浏览器视觉加载连续超时，按既定错误策略停止重试。
 - 阶段 0～4 全部完成；补记最终状态后将再提交并推送规划记录，确保工作树干净。
 - 临时预览产物已移入 `/Users/pilot/.Trash/my-agent-doc-previews-20260912`，可恢复；最终记录待提交。
+
+# 2026-09-13 本地 Agent Web 控制台
+
+- 已读取 planning-with-files 技能并复用仓库现有规划文件，新增阶段 0～4 计划。
+- 已确认工作树存在 8 个文件的未提交改动；这些内容属于既有工作，本轮将保留并避开破坏性覆盖。
+- 当前进入阶段 0：审计 HTTP/WS、daemon 生命周期、Session 持久化、slash/TUI 与现有依赖。
+- 已确认 Web API 现为独立 `serve` 前台进程，默认地址 127.0.0.1:8787；下一步核对消息时间字段与 daemon handler 数据契约，再决定最小持久化扩展。
+- 已确认 Session 消息缺少逐条时间/请求关联。计划以向后兼容的消息审计字段补齐新记录，同时让 Web API 对旧 Session 明确返回 `null` 时间，不伪造历史。
+- 阶段 0 完成：现有 dirty 基线 `cargo check --all-targets` 通过。已确定采用每 Session 的结构化 trace JSONL、daemon `session.trace` RPC、同源静态 Web UI 和入口侧幂等 Web launcher。
+- 当前进入阶段 1：先实现 trace 存储与 LoopEngine/daemon 关联，再接入 Web 查询接口。
+- 已新增向后兼容的 `SessionTraceRecord` 与每 Session `.trace` 追加/读取能力，并把 LoopEngine 的 request/model/tool/turn 生命周期接到 trace；正在补辅助序列化函数和 daemon request_id 透传后编译校验。
+- 阶段 1 完成：新增 `session.trace` RPC；定向测试验证完整模型输入、响应和时间字段可从 WebSocket 查询，旧 Session 无 trace 时返回空列表。
+- Web UI 与 TUI `/web` 第一版完成并通过编译；trace/session/slash/TUI 共 26 项定向测试全绿。当前进入浏览器视觉与真实进程生命周期验收。
+- 浏览器真实验收完成：新建 Session、Web 调用、失败态、trace 详情和控制台日志均符合预期；TUI `/web` 复用现有服务成功，未重复启动进程。
+- 发布门禁阶段：`cargo test --all-targets` 131/131、严格 Clippy、fmt、git diff check、Node JS 语法检查和 `cargo build --release` 全部通过；待执行 `cargo install` 与最终工作树审计。
+- 发布门禁最终复核完成：`cargo install --path . --force` 已执行，`my-agent --version` 为 0.1.0，release 与 PATH 二进制逐字节一致；隔离 Web/TUI 生命周期验收通过，临时工作区已移入可恢复废纸篓且无残留进程。
+- Web 控制台阶段 0～4 全部完成；本轮修改保留在当前工作树，未执行提交或推送。

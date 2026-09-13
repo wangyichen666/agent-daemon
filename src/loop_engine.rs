@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::context::ContextManager;
 use crate::provider::{Message, Provider, Response, Role, ToolCall};
-use crate::session::SessionStore;
+use crate::session::{SessionStore, SessionTraceRecord};
 use crate::tool_calls::ToolCallAssembler;
 use crate::tools::{ToolCancellation, ToolOutput, ToolRegistry};
 
@@ -159,6 +159,51 @@ impl LoopEngine {
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: CancellationToken,
     ) -> Result<String> {
+        self.run_turn_with_events_for_request(history, input, events, cancellation, None)
+            .await
+    }
+
+    pub async fn run_turn_with_events_for_request(
+        &self,
+        history: &mut Vec<Message>,
+        input: String,
+        events: Option<mpsc::UnboundedSender<AgentEvent>>,
+        cancellation: CancellationToken,
+        request_id: Option<String>,
+    ) -> Result<String> {
+        let started_at = Instant::now();
+        if let Some(request_id) = request_id.as_deref() {
+            self.record_trace(SessionTraceRecord::TurnStarted {
+                timestamp_ms: unix_time_ms(),
+                request_id: request_id.to_owned(),
+                input: input.clone(),
+            })
+            .await;
+        }
+        let result = self
+            .run_turn_inner(history, input, events, cancellation, request_id.as_deref())
+            .await;
+        if let Some(request_id) = request_id {
+            self.record_trace(SessionTraceRecord::TurnCompleted {
+                timestamp_ms: unix_time_ms(),
+                request_id,
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                success: result.is_ok(),
+                error: result.as_ref().err().map(|error| format!("{error:#}")),
+            })
+            .await;
+        }
+        result
+    }
+
+    async fn run_turn_inner(
+        &self,
+        history: &mut Vec<Message>,
+        input: String,
+        events: Option<mpsc::UnboundedSender<AgentEvent>>,
+        cancellation: CancellationToken,
+        trace_request_id: Option<&str>,
+    ) -> Result<String> {
         if cancellation.is_cancelled() {
             bail!("请求已取消");
         }
@@ -216,7 +261,14 @@ impl LoopEngine {
                 repetition_reminder = false;
             }
             let response = self
-                .request_model(&request_messages, &specs, &events, &cancellation, round)
+                .request_model(
+                    &request_messages,
+                    &specs,
+                    &events,
+                    &cancellation,
+                    round,
+                    trace_request_id,
+                )
                 .await?;
             match response {
                 Response::Text(text) => {
@@ -286,8 +338,13 @@ impl LoopEngine {
                     }
                     self.record(history, Message::assistant_tool_calls(calls.clone()))
                         .await?;
-                    let execute =
-                        self.execute_in_waves(&calls, events.clone(), &cancellation, round);
+                    let execute = self.execute_in_waves(
+                        &calls,
+                        events.clone(),
+                        &cancellation,
+                        round,
+                        trace_request_id,
+                    );
                     tokio::pin!(execute);
                     let results = tokio::select! {
                         results = &mut execute => results,
@@ -372,6 +429,7 @@ impl LoopEngine {
         events: &Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
         round: usize,
+        trace_request_id: Option<&str>,
     ) -> Result<Response> {
         let request_messages;
         let messages = if self.provider.capabilities().images {
@@ -388,12 +446,23 @@ impl LoopEngine {
             tool_spec_count = specs.len(),
             "开始请求模型"
         );
+        if let Some(request_id) = trace_request_id {
+            self.record_trace(SessionTraceRecord::ModelRequest {
+                timestamp_ms: unix_time_ms(),
+                request_id: request_id.to_owned(),
+                round,
+                provider: self.provider.api_type().to_string(),
+                messages: messages.to_vec(),
+                tools: specs.to_vec(),
+            })
+            .await;
+        }
         let request = self.provider.chat_stream(messages, specs, provider_events);
         tokio::pin!(request);
         let mut assembler = ToolCallAssembler::default();
         let started_at = Instant::now();
         let mut first_delta_ms = None;
-        loop {
+        let provider_result = loop {
             tokio::select! {
                 response = &mut request => {
                     let success = response.is_ok();
@@ -404,8 +473,7 @@ impl LoopEngine {
                         success,
                         "模型响应完成"
                     );
-                    response?;
-                    break;
+                    break response;
                 },
                 event = provider_rx.recv() => {
                     if let Some(event) = event
@@ -418,8 +486,24 @@ impl LoopEngine {
                         emit(events, AgentEvent::TextDelta(delta));
                     }
                 }
-                _ = cancellation.cancelled() => bail!("请求已取消"),
+                _ = cancellation.cancelled() => break Err(anyhow::anyhow!("请求已取消")),
             }
+        };
+        if let Err(error) = provider_result {
+            if let Some(request_id) = trace_request_id {
+                self.record_trace(SessionTraceRecord::ModelResponse {
+                    timestamp_ms: unix_time_ms(),
+                    request_id: request_id.to_owned(),
+                    round,
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                    first_delta_ms,
+                    success: false,
+                    response: None,
+                    error: Some(format!("{error:#}")),
+                })
+                .await;
+            }
+            return Err(error);
         }
         while let Ok(event) = provider_rx.try_recv() {
             if let Some(delta) = assembler.accept(event) {
@@ -427,6 +511,22 @@ impl LoopEngine {
             }
         }
         let response = assembler.finish();
+        if let Some(request_id) = trace_request_id {
+            self.record_trace(SessionTraceRecord::ModelResponse {
+                timestamp_ms: unix_time_ms(),
+                request_id: request_id.to_owned(),
+                round,
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                first_delta_ms,
+                success: !matches!(response, Response::ToolAssemblyFailed(_)),
+                response: Some(trace_response_value(&response)),
+                error: match &response {
+                    Response::ToolAssemblyFailed(error) => Some(error.message.clone()),
+                    Response::Text(_) | Response::ToolCalls(_) => None,
+                },
+            })
+            .await;
+        }
         match &response {
             Response::Text(text) => info!(
                 round,
@@ -476,12 +576,21 @@ impl LoopEngine {
         Ok(())
     }
 
+    async fn record_trace(&self, record: SessionTraceRecord) {
+        if let Some(session) = &self.session
+            && let Err(error) = session.append_trace(&record).await
+        {
+            warn!(%error, "写入 session trace 失败");
+        }
+    }
+
     async fn execute_in_waves(
         &self,
         calls: &[ToolCall],
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
         round: usize,
+        trace_request_id: Option<&str>,
     ) -> Vec<ToolExecution> {
         let mut results = Vec::with_capacity(calls.len());
         let mut cursor = 0;
@@ -494,7 +603,10 @@ impl LoopEngine {
                 let batch = stream::iter(calls[cursor..end].to_vec())
                     .map(|call: ToolCall| {
                         let events = events.clone();
-                        async move { self.execute_one(&call, events, cancellation, round).await }
+                        async move {
+                            self.execute_one(&call, events, cancellation, round, trace_request_id)
+                                .await
+                        }
                     })
                     .buffered(8)
                     .collect::<Vec<ToolExecution>>()
@@ -503,8 +615,14 @@ impl LoopEngine {
                 cursor = end;
             } else {
                 results.push(
-                    self.execute_one(&calls[cursor], events.clone(), cancellation, round)
-                        .await,
+                    self.execute_one(
+                        &calls[cursor],
+                        events.clone(),
+                        cancellation,
+                        round,
+                        trace_request_id,
+                    )
+                    .await,
                 );
                 cursor += 1;
             }
@@ -518,6 +636,7 @@ impl LoopEngine {
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
         round: usize,
+        trace_request_id: Option<&str>,
     ) -> ToolExecution {
         let started_at = Instant::now();
         debug!(
@@ -535,6 +654,17 @@ impl LoopEngine {
                 round,
             },
         );
+        if let Some(request_id) = trace_request_id {
+            self.record_trace(SessionTraceRecord::ToolStarted {
+                timestamp_ms: unix_time_ms(),
+                request_id: request_id.to_owned(),
+                round,
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .await;
+        }
         let (result, failed, error_message) = match self
             .tools
             .execute_with_cancellation(&call.name, call.arguments.clone(), cancellation)
@@ -563,6 +693,20 @@ impl LoopEngine {
                 error: error_message.clone(),
             },
         );
+        if let Some(request_id) = trace_request_id {
+            self.record_trace(SessionTraceRecord::ToolFinished {
+                timestamp_ms: unix_time_ms(),
+                request_id: request_id.to_owned(),
+                round,
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                success: !failed,
+                output: result.content.clone(),
+                error: error_message.clone(),
+            })
+            .await;
+        }
         info!(
             tool_call_id = %call.id,
             tool = %call.name,
@@ -612,6 +756,30 @@ fn emit(events: &Option<mpsc::UnboundedSender<AgentEvent>>, event: AgentEvent) {
     if let Some(events) = events {
         let _ = events.send(event);
     }
+}
+
+fn trace_response_value(response: &Response) -> serde_json::Value {
+    match response {
+        Response::Text(text) => serde_json::json!({
+            "type": "text",
+            "content": text,
+        }),
+        Response::ToolCalls(calls) => serde_json::json!({
+            "type": "tool_calls",
+            "tool_calls": calls,
+        }),
+        Response::ToolAssemblyFailed(error) => serde_json::json!({
+            "type": "tool_assembly_failed",
+            "code": error.code,
+            "message": error.message,
+        }),
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 struct ToolExecution {
@@ -1356,6 +1524,55 @@ mod tests {
                         && message.content.as_deref() == Some(PROGRESS_CHECKPOINT_REMINDER)
                 })
         );
+    }
+
+    #[tokio::test]
+    async fn audited_turn_records_exact_model_input_response_and_timing() {
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from([Response::Text("审计回答".to_owned())])),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let session = test_session("structured-trace");
+        let engine = LoopEngine::new(
+            provider.clone(),
+            ToolRegistry::new(),
+            test_context(provider),
+            session.clone(),
+        );
+
+        let answer = engine
+            .run_turn_with_events_for_request(
+                &mut Vec::new(),
+                "审计问题".to_owned(),
+                None,
+                CancellationToken::new(),
+                Some("web-request-9".to_owned()),
+            )
+            .await
+            .unwrap();
+        let records = session.load_trace().await.unwrap();
+
+        assert_eq!(answer, "审计回答");
+        assert!(matches!(
+            records.first(),
+            Some(SessionTraceRecord::TurnStarted { request_id, input, .. })
+                if request_id == "web-request-9" && input == "审计问题"
+        ));
+        assert!(records.iter().any(|record| matches!(
+            record,
+            SessionTraceRecord::ModelRequest { request_id, messages, .. }
+                if request_id == "web-request-9"
+                    && messages.iter().any(|message| message.content.as_deref() == Some("审计问题"))
+        )));
+        assert!(records.iter().any(|record| matches!(
+            record,
+            SessionTraceRecord::ModelResponse { response: Some(response), success: true, .. }
+                if response["content"] == "审计回答"
+        )));
+        assert!(matches!(
+            records.last(),
+            Some(SessionTraceRecord::TurnCompleted { success: true, .. })
+        ));
     }
 
     #[tokio::test]

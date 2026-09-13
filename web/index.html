@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>my-agent · 本地控制台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">✦</span>
+          <div>
+            <strong>my-agent</strong>
+            <span>local operations console</span>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span id="connection" class="connection is-connecting"><i></i>正在连接 daemon</span>
+          <button id="refresh" class="icon-button" type="button" title="刷新">↻</button>
+          <button id="settings" class="icon-button" type="button" title="连接设置">•••</button>
+        </div>
+      </header>
+
+      <main class="workspace-grid">
+        <aside class="session-panel panel">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Workspace memory</span>
+              <h1>Sessions</h1>
+            </div>
+            <span id="session-count" class="count">0</span>
+          </div>
+          <button id="new-session" class="primary-button" type="button">
+            <span>＋</span> 新建会话
+          </button>
+          <label class="search-box">
+            <span>⌕</span>
+            <input id="session-search" type="search" placeholder="搜索会话或首条问题" />
+          </label>
+          <div class="session-legend">
+            <span><i class="dot running"></i>运行中</span>
+            <span><i class="dot waiting"></i>待审批</span>
+          </div>
+          <div id="session-list" class="session-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="conversation-panel panel">
+          <div class="conversation-heading">
+            <div>
+              <span class="eyebrow">Agent workspace</span>
+              <h2 id="conversation-title">选择一个 Session</h2>
+              <p id="conversation-meta">所有入口产生的会话都会出现在这里</p>
+            </div>
+            <button id="cancel-turn" class="quiet-button danger hidden" type="button">停止本轮</button>
+          </div>
+          <div id="transcript" class="transcript">
+            <div class="empty-state">
+              <span class="empty-orbit">✦</span>
+              <h3>一个本地 Agent，两种工作视角</h3>
+              <p>在这里发起任务，或从左侧打开 TUI、CLI 与 Web 产生的任意 Session。</p>
+            </div>
+          </div>
+          <form id="composer" class="composer">
+            <textarea id="prompt" rows="2" placeholder="给本地 Agent 一个任务…" disabled></textarea>
+            <div class="composer-footer">
+              <span><kbd>⌘</kbd><kbd>Enter</kbd> 发送</span>
+              <button id="send" class="send-button" type="submit" disabled>发送 <span>↗</span></button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="trace-panel panel">
+          <div class="panel-heading trace-heading">
+            <div>
+              <span class="eyebrow">Execution lens</span>
+              <h2>链路详情</h2>
+            </div>
+            <span id="trace-count" class="count">0</span>
+          </div>
+          <div id="trace-summary" class="trace-summary">
+            <div><strong>—</strong><span>模型调用</span></div>
+            <div><strong>—</strong><span>工具调用</span></div>
+            <div><strong>—</strong><span>总耗时</span></div>
+          </div>
+          <div class="trace-filter" role="tablist">
+            <button class="active" data-filter="all" type="button">全部</button>
+            <button data-filter="model" type="button">LM</button>
+            <button data-filter="tool" type="button">工具</button>
+            <button data-filter="turn" type="button">Turn</button>
+          </div>
+          <div id="trace-list" class="trace-list">
+            <div class="trace-empty">选择 Session 后显示完整执行链路。</div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog">
+      <form method="dialog" class="settings-card">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">Connection</span>
+            <h2>连接设置</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+        </div>
+        <label>
+          API Token
+          <input id="token" type="password" autocomplete="off" placeholder="仅非回环绑定时需要" />
+        </label>
+        <p>Token 只保存在当前浏览器的 localStorage，不会写入 Session。</p>
+        <button id="reconnect" class="primary-button" value="cancel" type="button">保存并重新连接</button>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

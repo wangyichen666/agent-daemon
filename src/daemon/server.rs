@@ -513,6 +513,26 @@ mod tests {
         assert_eq!(sessions["sessions"][0]["preview"], "你好");
         let original_session_id = sessions["sessions"][0]["id"].as_str().unwrap().to_owned();
 
+        let trace = crate::entry::cli::request_result(
+            &client,
+            "session.trace",
+            json!({"session_id": original_session_id}),
+        )
+        .await
+        .unwrap();
+        let records = trace["records"].as_array().unwrap();
+        assert_eq!(records.first().unwrap()["kind"], "turn_started");
+        assert!(records.iter().any(|record| {
+            record["kind"] == "model_request"
+                && record["messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty())
+        }));
+        assert!(records.iter().any(|record| {
+            record["kind"] == "model_response" && record["response"]["content"] == "回环回答"
+        }));
+        assert_eq!(records.last().unwrap()["kind"], "turn_completed");
+
         let mut new_session = client.request("session.new", json!({})).await.unwrap();
         let ServerFrame::Response(new_session) = new_session.next().await.unwrap() else {
             panic!("预期 session.new 响应");
@@ -532,6 +552,11 @@ mod tests {
         assert_eq!(resumed["messages"].as_array().unwrap().len(), 2);
         assert_eq!(resumed["session_id"], original_session_id);
         let _ = std::fs::remove_file(SessionStore::pointer_path(&session_path));
+        let trace_name = format!(
+            "{}.trace",
+            session_path.file_name().unwrap().to_string_lossy()
+        );
+        let _ = std::fs::remove_file(session_path.with_file_name(trace_name));
         let _ = std::fs::remove_file(session_path);
     }
 

@@ -3,3 +3,4 @@ pub mod editor;
 pub mod recovery;
 pub mod serve;
 pub mod tui;
+pub mod web;

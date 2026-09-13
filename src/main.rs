@@ -133,7 +133,7 @@ async fn run_serve_command(workspace: &Path, bind: SocketAddr) -> Result<()> {
     paths.ensure_daemon(workspace).await?;
     let client = client::DaemonClient::connect_unix(&paths.socket).await?;
     let model = std::env::var("MODEL_NAME").context("缺少环境变量 MODEL_NAME")?;
-    run_http_server(client, bind, model, bearer_token).await
+    run_http_server(client, bind, model, bearer_token, workspace.to_path_buf()).await
 }
 
 async fn run_chat_command(workspace: &Path, prompt: Vec<String>) -> Result<()> {
