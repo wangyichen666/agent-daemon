@@ -451,3 +451,11 @@
 - 用户反馈 Web 页面无法查看 Session 日志和链路；截图错误为“协议帧大小 7643140 字节，超过 4194304 字节限制”。
 - 根因确认：前端 `inspectSession` 并行调用 `session.load` 与 `session.trace`，后端 handler 分别把完整消息数组/完整 trace 数组序列化为单个 JSON-RPC 响应；daemon 协议层 `MAX_FRAME_BYTES` 固定为 4 MiB，因此任一大响应都会让 `Promise.all` 失败并阻断整页。
 - `SessionStore::load`/`load_trace` 当前会完整读入内存；新增分页 RPC 时应先限制响应帧，再视需要优化文件读取，不能通过提高全局帧上限掩盖问题。
+
+# 2026-09-13 三档 Agent 权限模式
+
+- 当前所有生产工具的审批入口集中在 `SafetyPolicy`：文件读/写/编辑、shell 命令和 MCP 外部动作均经同一实例；子 Agent 复用工具 Arc，因此切换模式可自然覆盖 Agent 工作。
+- 现有默认行为等同“帮我批准”：工作区内读写放行，工作区外写入、风险命令和 MCP 外部动作需要审批，工作区外读取拒绝；灾难性命令始终硬拦截。
+- 新增模式语义：`request_approval` 对工作区内写/编辑以及可识别的联网命令也询问；`risk_approval` 保持现有风险边界；`full_access` 放行工作区外读取、风险命令和 MCP 审批，但仍拒绝灾难性命令。
+- SafetyPolicy 模式以共享 `AtomicU8` 存在于 daemon 生命周期内，Web RPC 与 TUI slash 通过同一 daemon 即时同步；Cron 使用独立安全策略，不受交互模式影响。
+- Web 顶部权限菜单采用用户截图的三项文案和选中态；TUI 新增 `/permissions [request|risk|full]`，`/permission`、`/mode` 为别名。

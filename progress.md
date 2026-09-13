@@ -240,3 +240,12 @@
 - [x] Web Session 查看页改为分页首屏、分别加载更多消息/链路；链路读取失败时消息仍可显示。
 - [x] 增加 300 KiB 多消息页预算测试与 RPC 分页回归；全量测试 134/134、Clippy、rustfmt、JS 语法和 diff 检查通过。
 - [x] 通过本地 Web 服务验证 Agent 工作台、Session 查看页、空 Session 日期分组和浏览器控制台无错误；release 构建并重新安装到 PATH。
+
+# 2026-09-13 三档 Agent 权限模式
+
+- [x] 完成 SafetyPolicy、工具注册和 daemon 生命周期审计，确认生产工具均共享同一安全策略。
+- [x] 新增 `request_approval`、`risk_approval`、`full_access` 三档模式与 `permissions.get/set` RPC；完全访问保留灾难性命令硬拦截，Cron 继续独立拒绝无人值守危险操作。
+- [x] 新增 TUI `/permissions [request|risk|full]`（别名 `/permission`、`/mode`）及 Web 顶部三档权限菜单。
+- [x] 新增 SafetyPolicy、slash、daemon RPC、嵌入 Web 资源回归；当前 136/136 全量测试、Clippy、rustfmt、JS 检查均通过。
+- [x] 重新构建/安装并完成 Web/TUI 真实界面验收；全量测试 136/136、Clippy、rustfmt、Node 语法与 diff 检查通过，发布版已同步到 PATH。
+- [x] 权限模式改动已准备提交并推送到 `origin/main`。

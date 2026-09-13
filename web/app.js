@@ -28,6 +28,7 @@
     activities: [],
     activeView: "agent",
     collapsedDays: new Set(),
+    permissionMode: null,
   };
 
   class RpcSocket {
@@ -136,6 +137,7 @@
       updateWorkspaceUi();
       setConnection("online", "Agent 已连接");
       setAgentControls();
+      await loadPermissionMode();
       await refreshSessions();
     } catch (error) {
       if (state.rpc !== rpc) return;
@@ -160,6 +162,7 @@
     $("#inspect-current").disabled = !state.agentSessionId;
     $("#workspace-trigger").disabled = Boolean(state.activeRequest);
     $("#change-workspace").disabled = Boolean(state.activeRequest);
+    $("#permission-trigger").disabled = !state.connected || Boolean(state.activeRequest);
   }
 
   function updateWorkspaceUi() {
@@ -169,6 +172,52 @@
     $("#workspace-path").textContent = state.workspace || "—";
     $("#composer-workspace").textContent = state.workspace || "尚未连接工作目录";
     $("#session-workspace").textContent = state.workspace || "尚未连接工作目录";
+  }
+
+  async function loadPermissionMode() {
+    if (!state.connected) return;
+    try {
+      const result = await state.rpc.request("permissions.get").promise;
+      state.permissionMode = result.mode;
+      updatePermissionUi(result);
+    } catch (error) {
+      state.permissionMode = null;
+      $("#permission-label").textContent = "不可用";
+      toast(`读取权限模式失败：${error.message}`);
+    }
+  }
+
+  function updatePermissionUi(result) {
+    $("#permission-label").textContent = result.label || "未设置";
+    $("#permission-label").title = result.description || "";
+    $$("[data-permission-mode]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.permissionMode === result.mode);
+    });
+  }
+
+  async function openPermissionsDialog() {
+    if (!state.connected) {
+      toast("连接工作区后才能切换权限模式。");
+      return;
+    }
+    $("#permissions-dialog").showModal();
+    await loadPermissionMode();
+  }
+
+  async function selectPermissionMode(mode) {
+    if (!state.connected || state.activeRequest || mode === state.permissionMode) return;
+    $$("[data-permission-mode]").forEach((button) => { button.disabled = true; });
+    try {
+      const result = await state.rpc.request("permissions.set", { mode }).promise;
+      state.permissionMode = result.mode;
+      updatePermissionUi(result);
+      $("#permissions-dialog").close();
+      toast(`已切换：${result.label}`);
+    } catch (error) {
+      toast(`切换权限模式失败：${error.message}`);
+    } finally {
+      $$("[data-permission-mode]").forEach((button) => { button.disabled = false; });
+    }
   }
 
   async function refreshSessions() {
@@ -743,6 +792,7 @@
     state.agentSnapshot = null;
     state.inspectedSnapshot = null;
     state.traces = [];
+    state.permissionMode = null;
     state.inspectedMessageOffset = 0;
     state.inspectedMessageTotal = 0;
     state.inspectedMessageHasMore = false;
@@ -844,6 +894,8 @@
   $$("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   $("#workspace-trigger").addEventListener("click", openWorkspacePicker);
   $("#change-workspace").addEventListener("click", openWorkspacePicker);
+  $("#permission-trigger").addEventListener("click", openPermissionsDialog);
+  $$('[data-permission-mode]').forEach((button) => button.addEventListener("click", () => selectPermissionMode(button.dataset.permissionMode)));
   $("#browse-go").addEventListener("click", () => browseDirectory($("#browse-path").value.trim()).catch((error) => toast(error.message)));
   $("#browse-path").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {

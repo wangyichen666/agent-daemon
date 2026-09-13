@@ -18,6 +18,7 @@ use crate::cron::CronManager;
 use crate::loop_engine::{CancellationToken, LoopEngine};
 use crate::mcp::McpManager;
 use crate::provider::Message;
+use crate::safety::SafetyPolicy;
 use crate::session::SessionStore;
 use crate::skills::SkillLibrary;
 
@@ -27,6 +28,7 @@ pub struct DaemonState {
     pub(crate) default_session: Arc<SessionRuntime>,
     pub(crate) sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub(crate) approvals: ApprovalBroker,
+    pub(crate) safety: Option<Arc<SafetyPolicy>>,
     pub(crate) active: Mutex<HashMap<ActiveKey, ActiveRequest>>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) skills: Option<SkillLibrary>,
@@ -171,6 +173,7 @@ impl DaemonState {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_services_and_log_path(
         engine: Arc<LoopEngine>,
@@ -181,6 +184,31 @@ impl DaemonState {
         cron: Option<Arc<CronManager>>,
         mcp: Option<Arc<McpManager>>,
         daemon_log_path: PathBuf,
+    ) -> Self {
+        Self::new_with_services_and_log_path_and_safety(
+            engine,
+            history,
+            session,
+            approvals,
+            skills,
+            cron,
+            mcp,
+            daemon_log_path,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_services_and_log_path_and_safety(
+        engine: Arc<LoopEngine>,
+        history: Vec<Message>,
+        session: Arc<SessionStore>,
+        approvals: ApprovalBroker,
+        skills: Option<SkillLibrary>,
+        cron: Option<Arc<CronManager>>,
+        mcp: Option<Arc<McpManager>>,
+        daemon_log_path: PathBuf,
+        safety: Option<Arc<SafetyPolicy>>,
     ) -> Self {
         let default_session_id = session.current_id_sync();
         let default_session = Arc::new(SessionRuntime {
@@ -195,6 +223,7 @@ impl DaemonState {
             default_session,
             sessions: Mutex::new(HashMap::new()),
             approvals,
+            safety,
             active: Mutex::new(HashMap::new()),
             shutdown: CancellationToken::new(),
             skills,

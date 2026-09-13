@@ -71,6 +71,7 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 | **多窗口隔离** | 每个 TUI/REPL/ACP 窗口拥有独立 session；历史、活动请求、审批、取消和订阅互不串线。 |
 | **Web Agent 工作台** | 默认首页专注实际开发：可浏览并切换本地工作目录、新建或继续 Agent 任务、流式查看响应与工具动态，并处理审批或取消。每个目录连接独立 daemon 与安全边界。 |
 | **Session 查看** | 独立页面搜索当前工作目录下由 Web、TUI、CLI、ACP 产生的 Session；列表按本地日期分组，可折叠/展开“今天”等日期，详情按页加载对话与链路，支持继续加载，超大单条内容会显示截断提示而不会阻塞整页。 |
+| **权限模式** | Web 与 TUI 共享三档工作区权限：请求批准、帮我批准、完全访问权限；切换命令为 `/permissions [request|risk|full]`，完全访问仍保留灾难性命令硬拦截。 |
 | **可观测性** | 每 Session 的结构化 `.trace` 与 daemon 日志同时保留 round、Provider 首增量/总耗时、工具耗时及 `session_id/request_id` 关联。 |
 
 ## 系统如何工作
@@ -183,6 +184,7 @@ my-agent
 /help      /status    /sessions   /resume [编号|ID]
 /new       /cancel    /skill      /cron
 /mcp       /ping      /dogfood    /web       /exit
+/permissions [request|risk|full]
 ```
 
 在 TUI 输入 `/dogfood` 会在 session 文件所在目录生成 `dogfood-<session>.log`，其中包含当前 session 的原始 LLM/ReAct 对话（用户消息、助手回复、工具调用参数和工具输出），以及按 `session_id` 筛选的 daemon 全链路日志。TUI 只显示生成文件的绝对路径，不把日志正文塞入对话区。

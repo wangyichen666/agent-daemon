@@ -29,6 +29,11 @@
             <strong id="workspace-label">正在读取…</strong>
             <i>⌄</i>
           </button>
+          <button id="permission-trigger" class="permission-trigger" type="button" title="切换 Agent 权限模式">
+            <span>权限模式</span>
+            <strong id="permission-label">正在读取…</strong>
+            <i>⌄</i>
+          </button>
           <span id="connection" class="connection is-connecting"><i></i><span>正在连接 daemon</span></span>
           <button id="settings" class="icon-button" type="button" title="连接设置">•••</button>
         </div>
@@ -207,6 +212,40 @@
         <div class="dialog-actions">
           <button class="quiet-button" value="cancel">取消</button>
           <button id="select-workspace" class="primary-button compact" type="button">选择当前目录</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="permissions-dialog" class="wide-dialog">
+      <form method="dialog" class="settings-card permissions-picker">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">Agent permission mode</span>
+            <h2>权限模式</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+        </div>
+        <p>权限模式作用于当前工作目录的 Agent、工具和 MCP。切换后 Web 与 TUI 立即共享。</p>
+        <div id="permission-options" class="permission-options">
+          <button type="button" class="permission-option" data-permission-mode="request_approval">
+            <span class="permission-icon">♧</span>
+            <span><strong>请求批准</strong><small>编辑文件或使用互联网时始终询问</small></span>
+            <i>✓</i>
+          </button>
+          <button type="button" class="permission-option" data-permission-mode="risk_approval">
+            <span class="permission-icon">⌁</span>
+            <span><strong>帮我批准</strong><small>仅对检测到的风险操作询问</small></span>
+            <i>✓</i>
+          </button>
+          <button type="button" class="permission-option" data-permission-mode="full_access">
+            <span class="permission-icon">!</span>
+            <span><strong>完全访问权限</strong><small>可不受限制地访问互联网和你电脑上的任何文件</small></span>
+            <i>✓</i>
+          </button>
+        </div>
+        <p class="permission-note">为避免不可恢复的系统破坏，灾难性命令仍会被硬拦截。</p>
+        <div class="dialog-actions">
+          <button class="quiet-button" value="cancel">关闭</button>
         </div>
       </form>
     </dialog>

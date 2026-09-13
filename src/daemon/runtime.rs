@@ -44,7 +44,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     ));
     let skills = SkillLibrary::from_env(workspace);
     skills.refresh().await?;
-    let mcp = Arc::new(McpManager::new(workspace, safety));
+    let mcp = Arc::new(McpManager::new(workspace, safety.clone()));
     mcp.reload().await;
     tools.register_dynamic_source(mcp.clone());
 
@@ -82,7 +82,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     let session = Arc::new(SessionStore::from_env(workspace));
     let history = session.load().await?;
     let engine = Arc::new(LoopEngine::new(provider, tools, context, session.clone()));
-    let state = Arc::new(DaemonState::new_with_services_and_log_path(
+    let state = Arc::new(DaemonState::new_with_services_and_log_path_and_safety(
         engine,
         history,
         session,
@@ -91,6 +91,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
         Some(cron.clone()),
         Some(mcp),
         RuntimePaths::for_workspace(workspace)?.log,
+        Some(safety),
     ));
     cron.start(state.shutdown.clone()).await;
     Ok(state)

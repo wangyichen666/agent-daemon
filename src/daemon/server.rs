@@ -309,18 +309,61 @@ mod tests {
             context,
             session.clone(),
         ));
+        let approvals = ApprovalBroker::new();
+        let safety = Arc::new(
+            crate::safety::SafetyPolicy::new(
+                std::env::current_dir().unwrap(),
+                Arc::new(approvals.clone()),
+            )
+            .unwrap(),
+        );
         (
-            Arc::new(DaemonState::new_with_services(
+            Arc::new(DaemonState::new_with_services_and_log_path_and_safety(
                 engine,
                 Vec::new(),
                 session,
-                ApprovalBroker::new(),
+                approvals,
                 skills,
                 cron,
                 mcp,
+                session_path.with_file_name("daemon.log"),
+                Some(safety),
             )),
             session_path,
         )
+    }
+
+    #[tokio::test]
+    async fn permissions_slash_and_rpc_share_the_same_mode() {
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::new()),
+        });
+        let (state, session_path) = state_with_provider(provider).await;
+        let client = InMemoryServer::start(state);
+
+        let current = crate::entry::cli::request_result(&client, "permissions.get", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(current["mode"], "risk_approval");
+
+        let changed = crate::entry::cli::request_result(
+            &client,
+            "slash.execute",
+            json!({"line": "/permissions full"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            changed["content"],
+            "已切换权限模式：完全访问权限（不询问即可访问电脑上的文件和互联网）"
+        );
+
+        let full = crate::entry::cli::request_result(&client, "permissions.get", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(full["mode"], "full_access");
+        assert_eq!(full["label"], "完全访问权限");
+        let _ = std::fs::remove_file(session_path);
     }
 
     #[tokio::test]

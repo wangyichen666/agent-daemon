@@ -16,6 +16,7 @@ pub enum SlashAction {
     Skill,
     Cron,
     Mcp,
+    Permissions,
     Dogfood,
     Web,
 }
@@ -109,6 +110,14 @@ const COMMANDS: &[SlashCommand] = &[
         usage: "/mcp <list|status|reload>",
         args: ArgSpec::AtLeastOne("子命令"),
         action: SlashAction::Mcp,
+    },
+    SlashCommand {
+        name: "permissions",
+        aliases: &["permission", "mode"],
+        help: "查看或切换 Agent 权限模式（request/risk/full）",
+        usage: "/permissions [request|risk|full]",
+        args: ArgSpec::OptionalOne("request、risk 或 full"),
+        action: SlashAction::Permissions,
     },
     SlashCommand {
         name: "ping",
@@ -312,6 +321,13 @@ mod tests {
                 args: Vec::new(),
             })
         );
+        assert!(matches!(
+            registry.parse("/permissions full"),
+            SlashParse::Command(SlashInvocation {
+                action: SlashAction::Permissions,
+                args,
+            }) if args == ["full"]
+        ));
     }
 
     #[test]
@@ -323,6 +339,7 @@ mod tests {
         }
         assert!(help.contains("/ping"));
         assert!(help.contains("/dogfood"));
+        assert!(help.contains("/permissions [request|risk|full]"));
     }
 
     #[test]

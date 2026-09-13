@@ -17,6 +17,7 @@ use super::protocol::{
 use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
 use crate::cron::ScheduleSpec;
 use crate::loop_engine::{AgentEvent, CancellationToken};
+use crate::safety::SafetyMode;
 use crate::session::SessionStatus;
 use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
 
@@ -62,6 +63,11 @@ struct SessionPageParams {
     offset: usize,
     #[serde(default = "default_web_page_limit")]
     limit: usize,
+}
+
+#[derive(Deserialize)]
+struct PermissionModeParams {
+    mode: String,
 }
 
 fn default_web_page_limit() -> usize {
@@ -128,6 +134,16 @@ impl DaemonState {
             "session.trace_page" => {
                 let result = match parse_params::<SessionPageParams>(&request.params) {
                     Ok(params) => self.session_trace_page(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "permissions.get" => {
+                send_result(&frames, request.id, self.permissions_get());
+            }
+            "permissions.set" => {
+                let result = match parse_params::<PermissionModeParams>(&request.params) {
+                    Ok(params) => self.permissions_set(&params.mode),
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -560,6 +576,48 @@ impl DaemonState {
         Ok((active_requests, approvals, status))
     }
 
+    fn permissions_get(&self) -> Result<Value, (i64, String)> {
+        let Some(safety) = self.safety.as_ref() else {
+            return Err((
+                INTERNAL_ERROR,
+                "当前 daemon 未暴露权限模式控制器".to_owned(),
+            ));
+        };
+        let mode = safety.mode();
+        Ok(json!({
+            "mode": mode.key(),
+            "label": mode.label(),
+            "description": mode.description(),
+            "options": SafetyMode::all().into_iter().map(|option| json!({
+                "mode": option.key(),
+                "label": option.label(),
+                "description": option.description(),
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn permissions_set(&self, value: &str) -> Result<Value, (i64, String)> {
+        let Some(safety) = self.safety.as_ref() else {
+            return Err((
+                INTERNAL_ERROR,
+                "当前 daemon 未暴露权限模式控制器".to_owned(),
+            ));
+        };
+        let Some(mode) = SafetyMode::parse(value) else {
+            return Err((
+                INVALID_PARAMS,
+                "权限模式无效，可选值：request、risk、full".to_owned(),
+            ));
+        };
+        safety.set_mode(mode);
+        Ok(json!({
+            "changed": true,
+            "mode": mode.key(),
+            "label": mode.label(),
+            "description": mode.description(),
+        }))
+    }
+
     async fn session_infos(&self) -> Result<Vec<crate::session::SessionInfo>, (i64, String)> {
         let mut sessions = self
             .session
@@ -736,6 +794,7 @@ impl DaemonState {
                 SlashAction::Skill => self.execute_skill_command(&invocation.args).await,
                 SlashAction::Cron => self.execute_cron_command(&invocation.args).await,
                 SlashAction::Mcp => self.execute_mcp_command(&invocation.args).await,
+                SlashAction::Permissions => self.execute_permissions_command(&invocation.args),
                 SlashAction::Ping => SlashResponse::Text {
                     content: "pong".to_owned(),
                 },
@@ -767,6 +826,34 @@ impl DaemonState {
         Ok(SlashResponse::Text {
             content: format!("dogfood 已生成：{}", dogfood_path.display()),
         })
+    }
+
+    fn execute_permissions_command(&self, args: &[String]) -> SlashResponse {
+        let Some(safety) = self.safety.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未暴露权限模式控制器。".to_owned(),
+            };
+        };
+        if args.is_empty() {
+            let mode = safety.mode();
+            return SlashResponse::Text {
+                content: format!(
+                    "当前权限模式：{}（{}）。切换用法：/permissions request|risk|full",
+                    mode.label(),
+                    mode.description()
+                ),
+            };
+        }
+        let Some(mode) = SafetyMode::parse(&args[0]) else {
+            return SlashResponse::Text {
+                content: "权限模式无效，可选值：request（请求批准）、risk（帮我批准）、full（完全访问权限）。"
+                    .to_owned(),
+            };
+        };
+        safety.set_mode(mode);
+        SlashResponse::Text {
+            content: format!("已切换权限模式：{}（{}）", mode.label(), mode.description()),
+        }
     }
 
     async fn execute_skill_command(&self, args: &[String]) -> SlashResponse {

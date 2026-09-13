@@ -2,9 +2,11 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -33,6 +35,53 @@ pub enum CommandDecision {
     Blocked(String),
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyMode {
+    RequestApproval,
+    RiskApproval,
+    FullAccess,
+}
+
+impl SafetyMode {
+    pub const fn all() -> [Self; 3] {
+        [Self::RequestApproval, Self::RiskApproval, Self::FullAccess]
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "request" | "ask" | "approval" | "request_approval" => Some(Self::RequestApproval),
+            "risk" | "risky" | "auto" | "risk_approval" => Some(Self::RiskApproval),
+            "full" | "access" | "full_access" => Some(Self::FullAccess),
+            _ => None,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::RequestApproval => "request_approval",
+            Self::RiskApproval => "risk_approval",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RequestApproval => "请求批准",
+            Self::RiskApproval => "帮我批准",
+            Self::FullAccess => "完全访问权限",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::RequestApproval => "编辑文件或使用互联网前始终询问",
+            Self::RiskApproval => "仅检测到风险操作时询问",
+            Self::FullAccess => "不询问即可访问电脑上的文件和互联网",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SafetyError {
     #[error("已拦截灾难性命令: {0}")]
@@ -53,6 +102,7 @@ pub trait Approval: Send + Sync {
 pub struct SafetyPolicy {
     workspace: PathBuf,
     approval: Arc<dyn Approval>,
+    mode: Arc<AtomicU8>,
 }
 
 impl SafetyPolicy {
@@ -62,7 +112,20 @@ impl SafetyPolicy {
         Ok(Self {
             workspace,
             approval,
+            mode: Arc::new(AtomicU8::new(SafetyMode::RiskApproval as u8)),
         })
+    }
+
+    pub fn mode(&self) -> SafetyMode {
+        match self.mode.load(Ordering::Relaxed) {
+            value if value == SafetyMode::RequestApproval as u8 => SafetyMode::RequestApproval,
+            value if value == SafetyMode::FullAccess as u8 => SafetyMode::FullAccess,
+            _ => SafetyMode::RiskApproval,
+        }
+    }
+
+    pub fn set_mode(&self, mode: SafetyMode) {
+        self.mode.store(mode as u8, Ordering::Relaxed);
     }
 
     pub async fn authorize_path(
@@ -71,7 +134,18 @@ impl SafetyPolicy {
         intent: PathIntent,
     ) -> Result<PathBuf> {
         let resolved = self.resolve_path(requested.as_ref())?;
+        let mode = self.mode();
+        if mode == SafetyMode::FullAccess {
+            return Ok(resolved);
+        }
         if resolved.starts_with(&self.workspace) {
+            if mode == SafetyMode::RequestApproval && !matches!(intent, PathIntent::Read) {
+                let prompt = format!("{intent}工作区内路径 {}", resolved.display());
+                if self.approval.request(&prompt).await? {
+                    return Ok(resolved);
+                }
+                return Err(SafetyError::UserRejected(prompt).into());
+            }
             return Ok(resolved);
         }
 
@@ -88,10 +162,24 @@ impl SafetyPolicy {
     }
 
     pub async fn authorize_command(&self, command: &str) -> Result<()> {
+        let mode = self.mode();
         match classify_command(command) {
+            CommandDecision::Allowed
+                if mode == SafetyMode::RequestApproval && command_uses_network(command) =>
+            {
+                let prompt = format!("使用互联网（命令）：{command}");
+                if self.approval.request(&prompt).await? {
+                    Ok(())
+                } else {
+                    Err(SafetyError::UserRejected(prompt).into())
+                }
+            }
             CommandDecision::Allowed => Ok(()),
             CommandDecision::Blocked(reason) => Err(SafetyError::BlockedCommand(reason).into()),
             CommandDecision::NeedsApproval(reason) => {
+                if mode == SafetyMode::FullAccess {
+                    return Ok(());
+                }
                 let prompt = format!("执行高风险命令（{reason}）：{command}");
                 if self.approval.request(&prompt).await? {
                     Ok(())
@@ -107,6 +195,10 @@ impl SafetyPolicy {
         description: &str,
         arguments: &Value,
     ) -> Result<()> {
+        if self.mode() == SafetyMode::FullAccess {
+            self.inspect_external_arguments(arguments, None, &mut Vec::new())?;
+            return Ok(());
+        }
         let mut notices = Vec::new();
         self.inspect_external_arguments(arguments, None, &mut notices)?;
         let arguments = arguments
@@ -184,6 +276,16 @@ fn is_command_key(key: &str) -> bool {
         key.to_ascii_lowercase().as_str(),
         "command" | "cmd" | "shell"
     )
+}
+
+fn command_uses_network(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    normalized.contains("http://")
+        || normalized.contains("https://")
+        || contains_program(
+            &normalized,
+            &["curl", "wget", "ssh", "scp", "rsync", "nc", "netcat"],
+        )
 }
 
 fn is_path_key(key: &str) -> bool {
@@ -448,5 +550,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(approval.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permission_modes_change_approval_boundary_without_disabling_hard_blocks() {
+        let approval = Arc::new(FixedApproval {
+            allowed: true,
+            calls: AtomicUsize::new(0),
+        });
+        let workspace = std::env::current_dir().unwrap();
+        let policy = SafetyPolicy::new(&workspace, approval.clone()).unwrap();
+        let inside = workspace.join("mode-test.txt");
+
+        policy.set_mode(SafetyMode::RequestApproval);
+        policy
+            .authorize_path(&inside, PathIntent::Write)
+            .await
+            .unwrap();
+        policy
+            .authorize_command("curl https://example.com")
+            .await
+            .unwrap();
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 2);
+
+        policy.set_mode(SafetyMode::RiskApproval);
+        policy
+            .authorize_path(&inside, PathIntent::Write)
+            .await
+            .unwrap();
+        policy.authorize_command("printf safe").await.unwrap();
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 2);
+
+        policy.set_mode(SafetyMode::FullAccess);
+        let outside = workspace.parent().unwrap().join("mode-outside.txt");
+        assert_eq!(
+            policy
+                .authorize_path(&outside, PathIntent::Read)
+                .await
+                .unwrap(),
+            outside
+        );
+        policy.authorize_command("pkill my-server").await.unwrap();
+        assert!(policy.authorize_command("rm -rf /").await.is_err());
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 2);
     }
 }

@@ -982,12 +982,15 @@ mod tests {
         assert!(html.contains("id=\"agent-view\""));
         assert!(html.contains("id=\"sessions-view\""));
         assert!(html.contains("id=\"workspace-dialog\""));
+        assert!(html.contains("id=\"permissions-dialog\""));
         assert!(html.contains("id=\"session-list\""));
         assert!(WEB_APP.contains("session.trace"));
         assert!(WEB_APP.contains("session.load_page"));
         assert!(WEB_APP.contains("session.trace_page"));
         assert!(WEB_APP.contains("loadMoreMessages"));
         assert!(WEB_APP.contains("loadMoreTraces"));
+        assert!(WEB_APP.contains("permissions.get"));
+        assert!(WEB_APP.contains("permissions.set"));
         assert!(WEB_APP.contains("workspace:"));
         assert!(WEB_APP.contains("sessionDayKey"));
         assert!(WEB_APP.contains("toggleSessionDay"));

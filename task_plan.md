@@ -525,3 +525,35 @@
 | 错误 | 次数 | 处理 |
 |---|---:|---|
 | 首个大消息分页测试误假设单条消息会立即触发页满，实际单条内容先被压缩后仍可与后续项同页 | 1 | 改为构造多条 300 KiB 消息，验证页级字节预算、`has_more` 和截断标记，不重复该断言 |
+
+# 三档 Agent 权限模式（2026-09-13）
+
+## 目标
+
+在同一工作区的 Web 与 TUI 提供三档共享模式：请求批准、帮我批准、完全访问权限；模式切换直接作用于 daemon 使用的 SafetyPolicy，完全访问跳过审批但保留灾难性命令硬拦截。
+
+## 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---:|---|
+| 0. SafetyPolicy 审计 | complete | 明确现有路径、命令、MCP 审批入口和 daemon 生命周期 |
+| 1. daemon/RPC 契约 | complete | SafetyPolicy 支持三档；Web/TUI 可读写同一个工作区模式 |
+| 2. Web/TUI 入口 | complete | Web 菜单与 `/permissions [request|risk|full]` 可切换并反馈当前模式 |
+| 3. 回归与交付 | complete | 审批边界、前端资源、全量测试和安装推送通过 |
+
+## 本轮约束
+
+- 模式按工作区 daemon 共享，目录切换后使用目标目录自己的模式状态；不向 Agent 请求参数注入可变 cwd。
+- “完全访问权限”只跳过安全审批，不解除 fork bomb、磁盘擦除、根目录递归删除等硬拦截。
+- Cron 无人值守任务继续使用独立的 `UnattendedApproval`，不会因交互模式切换而自动放宽。
+
+## 本轮错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+| 一次 cargo test 传入两个独立过滤串，Cargo 拒绝第二个参数 | 1 | 改为分开运行 daemon RPC 与 SafetyPolicy 两个定向测试，不重复该调用方式 |
+## 交付记录
+
+- Web 权限菜单已在隔离发布版服务中验证，默认显示“帮我批准”，弹窗展示三档选项和灾难性命令硬拦截说明。
+- TUI `/permissions` 与 Web `permissions.get/set` 已通过共享状态回归测试；全量测试 136/136、Clippy、rustfmt、Node 语法和 diff 检查通过。
+- 发布版已重新构建并安装到 `/Users/pilot/.cargo/bin/my-agent` 与 `/Users/pilot/.local/bin/my-agent`，二进制逐字节一致。

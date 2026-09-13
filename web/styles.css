@@ -54,6 +54,15 @@ h1, h2, h3, p { margin: 0; }
 .workspace-trigger > span { grid-column: 1; color: var(--muted); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .workspace-trigger strong { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 650 11px ui-monospace, monospace; }
 .workspace-trigger i { grid-column: 2; grid-row: 1 / 3; align-self: center; color: var(--teal); font-style: normal; }
+.permission-trigger {
+  min-width: 126px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px;
+  padding: 7px 10px; text-align: left; border: 1px solid rgba(181,111,37,.26); border-radius: 11px;
+  background: rgba(255,244,223,.62); cursor: pointer;
+}
+.permission-trigger > span { grid-column: 1; color: var(--muted); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.permission-trigger strong { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--amber); font-size: 11px; }
+.permission-trigger i { grid-column: 2; grid-row: 1 / 3; align-self: center; color: var(--amber); font-style: normal; }
+.permission-trigger:disabled { opacity: .5; cursor: not-allowed; }
 .connection { display: flex; align-items: center; gap: 8px; padding: 8px 9px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .connection > i { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 5px rgba(181,111,37,.1); }
 .connection.is-online > i { background: var(--teal); box-shadow: 0 0 0 5px rgba(13,102,91,.1); }
@@ -230,6 +239,16 @@ dialog::backdrop { background: rgba(21,31,28,.32); backdrop-filter: blur(5px); }
 .directory-item:hover { color: var(--teal); background: var(--white); }
 .directory-empty { padding: 28px; text-align: center; color: var(--muted); font-size: 11px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.permission-options { display: grid; gap: 8px; }
+.permission-option { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 11px; width: 100%; padding: 13px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); cursor: pointer; text-align: left; }
+.permission-option:hover, .permission-option.active { border-color: rgba(181,111,37,.48); background: #fff4df; }
+.permission-option .permission-icon { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgba(181,111,37,.35); border-radius: 50%; color: var(--amber); font-size: 18px; }
+.permission-option strong, .permission-option small { display: block; }
+.permission-option strong { font-size: 13px; }
+.permission-option small { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.permission-option > i { color: var(--amber); font-size: 16px; font-style: normal; opacity: 0; }
+.permission-option.active > i { opacity: 1; }
+.permission-note { margin-top: 12px !important; color: var(--muted); font-size: 10px !important; }
 .toast { position: fixed; z-index: 20; left: 50%; bottom: 25px; transform: translate(-50%, 20px); padding: 10px 14px; border-radius: 10px; color: white; background: #23312d; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .2s ease; font-size: 12px; }
 .toast.show { transform: translate(-50%, 0); opacity: 1; }
 
@@ -249,6 +268,7 @@ dialog::backdrop { background: rgba(21,31,28,.32); backdrop-filter: blur(5px); }
   .primary-nav { grid-column: 1; grid-row: 2; justify-self: start; }
   .topbar-actions { grid-column: 2; grid-row: 1 / 3; }
   .workspace-trigger { max-width: 45vw; }
+  .permission-trigger { min-width: 0; max-width: 27vw; }
   .agent-layout, .session-layout { height: auto; min-height: 520px; grid-template-columns: minmax(0, 1fr); }
   .conversation-panel { height: calc(100vh - 132px); min-height: 590px; }
   .activity-panel { height: 520px; }
@@ -268,6 +288,9 @@ dialog::backdrop { background: rgba(21,31,28,.32); backdrop-filter: blur(5px); }
 @media (max-width: 520px) {
   .brand strong { font-size: 15px; }
   .workspace-trigger { max-width: 52vw; }
+  .permission-trigger { max-width: 28vw; }
+  .permission-trigger > span { display: none; }
+  .permission-trigger strong { grid-row: 1 / 3; align-self: center; }
   .workspace-trigger > span { display: none; }
   .workspace-trigger strong { grid-row: 1 / 3; align-self: center; }
   .primary-nav button { padding-inline: 11px; }
