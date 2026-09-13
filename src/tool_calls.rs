@@ -53,6 +53,7 @@ impl ToolCallAssembler {
         if self.failure.is_some() {
             return match event {
                 ProviderEvent::TextDelta(delta) => Some(delta),
+                ProviderEvent::ThinkingDelta(_) => None,
                 _ => None,
             };
         }
@@ -61,6 +62,7 @@ impl ToolCallAssembler {
                 self.text.push_str(&delta);
                 Some(delta)
             }
+            ProviderEvent::ThinkingDelta(_) => None,
             ProviderEvent::ToolCallStarted { exec_id, name } => {
                 if name.trim().is_empty() {
                     self.fail("missing_name", "工具调用名称为空");

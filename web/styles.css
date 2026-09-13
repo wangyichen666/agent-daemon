@@ -123,6 +123,12 @@ h1, h2, h3, p { margin: 0; }
 .message.tool .message-content { background: #edf1eb; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .message.system .message-content { padding: 9px 12px; color: var(--muted); background: transparent; border-style: dashed; font-size: 12px; }
 .message.assistant .message-content { white-space: normal; }
+.thinking-details { margin: 0 0 10px; border: 1px solid rgba(13,102,91,.18); border-radius: 10px; background: rgba(217,233,227,.22); }
+.thinking-details > summary { display: flex; justify-content: space-between; gap: 8px; padding: 8px 11px; color: var(--teal); cursor: pointer; list-style-position: inside; font-size: 11px; }
+.thinking-details > summary small { color: var(--muted); font-size: 10px; }
+.thinking-details[open] > summary { border-bottom: 1px solid rgba(13,102,91,.14); }
+.thinking-content { max-height: 280px; overflow: auto; padding: 10px 12px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.thinking-content p:last-child { margin-bottom: 0; }
 .message-content p { margin: 0 0 11px; }
 .message-content p:last-child { margin-bottom: 0; }
 .message-content h1, .message-content h2, .message-content h3, .message-content h4, .message-content h5, .message-content h6 { margin: 0 0 10px; color: var(--ink); font-family: Georgia, serif; line-height: 1.25; }
@@ -132,6 +138,11 @@ h1, h2, h3, p { margin: 0; }
 .message-content h4, .message-content h5, .message-content h6 { font-size: 15px; }
 .message-content ul, .message-content ol { margin: 0 0 11px; padding-left: 23px; }
 .message-content li + li { margin-top: 4px; }
+.message-content table { width: 100%; margin: 0 0 12px; border-collapse: collapse; font-size: 12px; }
+.message-content th, .message-content td { padding: 7px 9px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.message-content th { color: var(--ink); background: rgba(217,233,227,.45); font-weight: 700; }
+.message-content th.align-center, .message-content td.align-center { text-align: center; }
+.message-content th.align-right, .message-content td.align-right { text-align: right; }
 .message-content blockquote { margin: 0 0 11px; padding: 6px 12px; border-left: 3px solid rgba(13,102,91,.34); color: var(--muted); background: rgba(217,233,227,.3); }
 .message-content hr { margin: 14px 0; border: 0; border-top: 1px solid var(--line); }
 .message-content code { padding: 2px 5px; border-radius: 5px; color: #30544d; background: rgba(217,233,227,.72); font: .9em ui-monospace, SFMono-Regular, Menlo, monospace; }

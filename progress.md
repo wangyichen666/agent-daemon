@@ -256,3 +256,12 @@
 - [x] WebSocket `text_delta` 改为帧级批量重绘，流式生成期间显示光标和“生成响应”状态。
 - [x] 内置安全 Markdown 渲染，支持标题、段落、列表、引用、分隔线、行内代码、代码块、强调和安全链接。
 - [x] 浏览器隔离验收通过；全量测试 136/136、Clippy、rustfmt、Node 语法、嵌入资源回归和 diff 检查通过；release 已重新安装。
+
+# 2026-09-13 Web Markdown 表格与思考流
+
+- [x] 新增 Provider 思考增量归一化：OpenAI `reasoning_content`、Anthropic thinking block/`thinking_delta`、Ollama `thinking`/`reasoning`。
+- [x] daemon/LoopEngine 新增 `thinking_delta`、`thinking_finished` 事件；思考和正文在同一真实异步流中投影到 Web，Session 消息与 ModelResponse trace 保留独立 thinking 字段。
+- [x] Web Markdown renderer 增加表格、对齐和安全单元格渲染；正文继续支持标题、列表、代码、引用和安全链接。
+- [x] 思考区域在生成期间自动展开并显示光标，收到 `thinking_finished` 后自动折叠，正文继续显示增量光标。
+- [x] 新增 Provider 与 LoopEngine 回归，验证思考片段顺序、正文切换、历史持久化和 trace；全量 `cargo test --all-targets` 140/140、Clippy、rustfmt、Node 语法和 diff 检查通过。
+- [x] 隔离 WebSocket 与浏览器验收确认真实时间间隔的思考→正文流，以及最终语义 Markdown `<table>`；验收用的服务、脚本和临时工作区已停止并移入可恢复废纸篓。

@@ -216,6 +216,11 @@ fn consume_sse_line(
         );
     }
     for choice in chunk.choices {
+        if let Some(thinking) = choice.delta.thinking
+            && !thinking.is_empty()
+        {
+            send_event(events, ProviderEvent::ThinkingDelta(thinking))?;
+        }
         if let Some(content) = choice.delta.content {
             send_event(events, ProviderEvent::TextDelta(content))?;
         }
@@ -385,6 +390,8 @@ struct StreamChoice {
 #[derive(Default, Deserialize)]
 struct StreamDelta {
     content: Option<String>,
+    #[serde(alias = "reasoning_content", alias = "reasoning", alias = "thinking")]
+    thinking: Option<String>,
     #[serde(default)]
     tool_calls: Vec<StreamToolCall>,
 }
@@ -475,6 +482,22 @@ mod tests {
             panic!("缺少工具开始事件");
         };
         assert_eq!(exec_id.source, IdentitySource::WireId("call-1".to_owned()));
+    }
+
+    #[test]
+    fn emits_reasoning_content_as_thinking_delta() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut calls = BTreeMap::new();
+        consume_sse_line(
+            br#"data: {"choices":[{"delta":{"reasoning_content":"\u5148\u68c0\u67e5\u9879\u76ee\u7ed3\u6784"}}]}"#,
+            &mut calls,
+            &events,
+        )
+        .unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ProviderEvent::ThinkingDelta("先检查项目结构".to_owned())
+        );
     }
 
     #[test]

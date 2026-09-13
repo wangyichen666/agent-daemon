@@ -140,6 +140,7 @@ pub async fn run_chat(client: &DaemonClient, input: &str, session_id: &str) -> R
                 EventKind::ApprovalRequired => {
                     respond_to_approval(client, &event.data).await?;
                 }
+                EventKind::ThinkingDelta | EventKind::ThinkingFinished => {}
                 EventKind::TurnStarted | EventKind::TurnCompleted => {}
             },
             ServerFrame::Response(response) => {
@@ -366,6 +367,7 @@ async fn consume_recovered_stream(
                         respond_to_approval(client, &event.data).await?;
                     }
                 }
+                EventKind::ThinkingDelta | EventKind::ThinkingFinished => {}
                 EventKind::TurnStarted | EventKind::TurnCompleted => {}
             },
             ServerFrame::Response(response) => {

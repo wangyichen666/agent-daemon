@@ -69,7 +69,7 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 | **Cron / Heartbeat** | interval/五段 cron、独立 session、有限指数退避、无人值守安全拒绝；heartbeat 不调用模型。 |
 | **MCP stdio** | 本地 server 握手、工具发现、动态桥接、默认审批、错误隔离和子进程清理。 |
 | **多窗口隔离** | 每个 TUI/REPL/ACP 窗口拥有独立 session；历史、活动请求、审批、取消和订阅互不串线。 |
-| **Web Agent 工作台** | 默认首页专注实际开发：可浏览并切换本地工作目录、新建或继续 Agent 任务，按 WebSocket 流式查看 Markdown 响应，并处理审批或取消；工具调用与输出默认折叠、仍可展开查看。每个目录连接独立 daemon 与安全边界。 |
+| **Web Agent 工作台** | 默认首页专注实际开发：可浏览并切换本地工作目录、新建或继续 Agent 任务，按 WebSocket 实时查看思考与正文增量；正文支持安全 Markdown（含表格），思考结束后自动折叠，并处理审批或取消；工具调用与输出默认折叠、仍可展开查看。每个目录连接独立 daemon 与安全边界。 |
 | **Session 查看** | 独立页面搜索当前工作目录下由 Web、TUI、CLI、ACP 产生的 Session；列表按本地日期分组，可折叠/展开“今天”等日期，详情按页加载对话与链路，支持继续加载，超大单条内容会显示截断提示而不会阻塞整页。 |
 | **权限模式** | Web 与 TUI 共享三档工作区权限：请求批准、帮我批准、完全访问权限；切换命令为 `/permissions [request|risk|full]`，完全访问仍保留灾难性命令硬拦截。 |
 | **可观测性** | 每 Session 的结构化 `.trace` 与 daemon 日志同时保留 round、Provider 首增量/总耗时、工具耗时及 `session_id/request_id` 关联。 |

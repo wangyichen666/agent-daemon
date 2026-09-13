@@ -642,7 +642,7 @@
         <article class="panel status-card">
           <span class="badge done">已实现</span>
           <h3>Web Agent 工作台</h3>
-          <p>默认首页专注 Agent 开发，可浏览并选择本地工作目录、新建或继续任务，按 WebSocket 流式查看安全解析的 Markdown 响应并处理审批/取消；工具调用与输出默认折叠，Session 与完整 LM/工具时间线位于独立查看页，历史列表按日期分组并支持折叠展开，详情按页加载并可继续读取，超大记录会显示截断提示。</p>
+          <p>默认首页专注 Agent 开发，可浏览并选择本地工作目录、新建或继续任务，按 WebSocket 实时查看模型思考与正文增量；思考结束后自动折叠，正文安全解析 Markdown（含表格）并处理审批/取消；工具调用与输出默认折叠，Session 与完整 LM/工具时间线位于独立查看页，历史列表按日期分组并支持折叠展开，详情按页加载并可继续读取，超大记录会显示截断提示。</p>
         </article>
         <article class="panel status-card">
           <span class="badge done">已实现</span>
@@ -746,7 +746,7 @@
           <div class="step-no">06</div>
           <div class="step-body">
             <h3>流式调用模型</h3>
-            <p>Provider 分别适配 OpenAI Chat Completions、Anthropic Messages 与 Ollama，将 SSE/NDJSON 归一为严格生命周期事件；唯一 canonical assembler 负责工具参数重组与 fail-closed。</p>
+            <p>Provider 分别适配 OpenAI Chat Completions、Anthropic Messages 与 Ollama，将 SSE/NDJSON 的思考增量、正文增量和工具事件统一透传；唯一 canonical assembler 负责工具参数重组与 fail-closed。</p>
             <div class="branch">
               <div class="branch-text"><strong>纯文本</strong><br>模型认为任务完成，转到第 11 步。</div>
               <div class="branch-tools"><strong>工具调用</strong><br>进入参数、安全和执行链路。</div>
@@ -793,7 +793,7 @@
           <div class="step-no">12</div>
           <div class="step-body">
             <h3>同一事件流投影到入口</h3>
-            <p>TUI/CLI 在终端绘制或打印流式文本，HTTP 转成 OpenAI SSE，WebSocket 转发双工 JSON-RPC，ACP 输出标准 SessionNotification/Permission 请求；最终 Response 到达后释放 turn 锁。断线可通过 <code>session.load</code> + <code>agent.subscribe</code> 恢复，Ctrl-C 仅发送取消请求。</p>
+            <p>TUI/CLI 在终端绘制或打印流式文本，HTTP 转成 OpenAI SSE，WebSocket 转发双工 JSON-RPC（含思考与正文增量），ACP 输出标准 SessionNotification/Permission 请求；最终 Response 到达后释放 turn 锁。断线可通过 <code>session.load</code> + <code>agent.subscribe</code> 恢复，Ctrl-C 仅发送取消请求。</p>
           </div>
         </article>
       </div>

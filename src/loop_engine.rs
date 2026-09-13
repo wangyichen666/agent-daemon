@@ -11,7 +11,7 @@ use tokio::sync::{Notify, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::context::ContextManager;
-use crate::provider::{Message, Provider, Response, Role, ToolCall};
+use crate::provider::{Message, Provider, ProviderEvent, Response, Role, ToolCall};
 use crate::session::{SessionStore, SessionTraceRecord};
 use crate::tool_calls::ToolCallAssembler;
 use crate::tools::{ToolCancellation, ToolOutput, ToolRegistry};
@@ -26,6 +26,8 @@ const PROGRESS_CHECKPOINT_REMINDER: &str = "这是一次长任务的进度检查
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
     TurnStarted,
+    ThinkingDelta(String),
+    ThinkingFinished,
     TextDelta(String),
     ToolStarted {
         call_id: String,
@@ -260,7 +262,7 @@ impl LoopEngine {
                 request_messages.push(Message::text(Role::System, REPETITION_REMINDER));
                 repetition_reminder = false;
             }
-            let response = self
+            let output = self
                 .request_model(
                     &request_messages,
                     &specs,
@@ -270,10 +272,13 @@ impl LoopEngine {
                     trace_request_id,
                 )
                 .await?;
-            match response {
+            match output.response {
                 Response::Text(text) => {
-                    self.record(history, Message::text(Role::Assistant, text.clone()))
-                        .await?;
+                    self.record(
+                        history,
+                        Message::assistant_with_thinking(text.clone(), output.thinking),
+                    )
+                    .await?;
                     emit(
                         &events,
                         AgentEvent::TurnCompleted {
@@ -336,8 +341,11 @@ impl LoopEngine {
                         }
                         continue;
                     }
-                    self.record(history, Message::assistant_tool_calls(calls.clone()))
-                        .await?;
+                    self.record(
+                        history,
+                        Message::assistant_tool_calls_with_thinking(calls.clone(), output.thinking),
+                    )
+                    .await?;
                     let execute = self.execute_in_waves(
                         &calls,
                         events.clone(),
@@ -430,7 +438,7 @@ impl LoopEngine {
         cancellation: &CancellationToken,
         round: usize,
         trace_request_id: Option<&str>,
-    ) -> Result<Response> {
+    ) -> Result<ModelOutput> {
         let request_messages;
         let messages = if self.provider.capabilities().images {
             messages
@@ -461,7 +469,13 @@ impl LoopEngine {
         tokio::pin!(request);
         let mut assembler = ToolCallAssembler::default();
         let started_at = Instant::now();
-        let mut first_delta_ms = None;
+        let mut timing = StreamTiming {
+            started_at,
+            first_delta_ms: None,
+            round,
+        };
+        let mut thinking = String::new();
+        let mut thinking_active = false;
         let provider_result = loop {
             tokio::select! {
                 response = &mut request => {
@@ -469,34 +483,36 @@ impl LoopEngine {
                     info!(
                         round,
                         elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        first_delta_ms,
+                        first_delta_ms = timing.first_delta_ms,
                         success,
                         "模型响应完成"
                     );
                     break response;
                 },
                 event = provider_rx.recv() => {
-                    if let Some(event) = event
-                        && let Some(delta) = assembler.accept(event)
-                    {
-                        if first_delta_ms.is_none() {
-                            first_delta_ms = Some(started_at.elapsed().as_millis() as u64);
-                            info!(round, first_delta_ms, "收到模型首个流式增量");
-                        }
-                        emit(events, AgentEvent::TextDelta(delta));
+                    if let Some(event) = event {
+                        consume_provider_event(
+                            event,
+                            &mut assembler,
+                            events,
+                            &mut thinking,
+                            &mut thinking_active,
+                            &mut timing,
+                        );
                     }
                 }
                 _ = cancellation.cancelled() => break Err(anyhow::anyhow!("请求已取消")),
             }
         };
         if let Err(error) = provider_result {
+            finish_thinking(events, &mut thinking_active);
             if let Some(request_id) = trace_request_id {
                 self.record_trace(SessionTraceRecord::ModelResponse {
                     timestamp_ms: unix_time_ms(),
                     request_id: request_id.to_owned(),
                     round,
                     duration_ms: started_at.elapsed().as_millis() as u64,
-                    first_delta_ms,
+                    first_delta_ms: timing.first_delta_ms,
                     success: false,
                     response: None,
                     error: Some(format!("{error:#}")),
@@ -506,10 +522,16 @@ impl LoopEngine {
             return Err(error);
         }
         while let Ok(event) = provider_rx.try_recv() {
-            if let Some(delta) = assembler.accept(event) {
-                emit(events, AgentEvent::TextDelta(delta));
-            }
+            consume_provider_event(
+                event,
+                &mut assembler,
+                events,
+                &mut thinking,
+                &mut thinking_active,
+                &mut timing,
+            );
         }
+        finish_thinking(events, &mut thinking_active);
         let response = assembler.finish();
         if let Some(request_id) = trace_request_id {
             self.record_trace(SessionTraceRecord::ModelResponse {
@@ -517,9 +539,12 @@ impl LoopEngine {
                 request_id: request_id.to_owned(),
                 round,
                 duration_ms: started_at.elapsed().as_millis() as u64,
-                first_delta_ms,
+                first_delta_ms: timing.first_delta_ms,
                 success: !matches!(response, Response::ToolAssemblyFailed(_)),
-                response: Some(trace_response_value(&response)),
+                response: Some(trace_response_value(
+                    &response,
+                    (!thinking.is_empty()).then_some(thinking.as_str()),
+                )),
                 error: match &response {
                     Response::ToolAssemblyFailed(error) => Some(error.message.clone()),
                     Response::Text(_) | Response::ToolCalls(_) => None,
@@ -565,7 +590,10 @@ impl LoopEngine {
                 "模型响应装配失败"
             ),
         }
-        Ok(response)
+        Ok(ModelOutput {
+            response,
+            thinking: (!thinking.is_empty()).then_some(thinking),
+        })
     }
 
     async fn record(&self, history: &mut Vec<Message>, message: Message) -> Result<()> {
@@ -758,8 +786,56 @@ fn emit(events: &Option<mpsc::UnboundedSender<AgentEvent>>, event: AgentEvent) {
     }
 }
 
-fn trace_response_value(response: &Response) -> serde_json::Value {
-    match response {
+struct ModelOutput {
+    response: Response,
+    thinking: Option<String>,
+}
+
+struct StreamTiming {
+    started_at: Instant,
+    first_delta_ms: Option<u64>,
+    round: usize,
+}
+
+fn consume_provider_event(
+    event: ProviderEvent,
+    assembler: &mut ToolCallAssembler,
+    events: &Option<mpsc::UnboundedSender<AgentEvent>>,
+    thinking: &mut String,
+    thinking_active: &mut bool,
+    timing: &mut StreamTiming,
+) {
+    if let ProviderEvent::ThinkingDelta(delta) = event {
+        if !delta.is_empty() {
+            thinking.push_str(&delta);
+            *thinking_active = true;
+            emit(events, AgentEvent::ThinkingDelta(delta));
+        }
+        return;
+    }
+    if let Some(delta) = assembler.accept(event) {
+        finish_thinking(events, thinking_active);
+        if timing.first_delta_ms.is_none() {
+            timing.first_delta_ms = Some(timing.started_at.elapsed().as_millis() as u64);
+            info!(
+                round = timing.round,
+                first_delta_ms = ?timing.first_delta_ms,
+                "收到模型首个流式增量"
+            );
+        }
+        emit(events, AgentEvent::TextDelta(delta));
+    }
+}
+
+fn finish_thinking(events: &Option<mpsc::UnboundedSender<AgentEvent>>, thinking_active: &mut bool) {
+    if *thinking_active {
+        emit(events, AgentEvent::ThinkingFinished);
+        *thinking_active = false;
+    }
+}
+
+fn trace_response_value(response: &Response, thinking: Option<&str>) -> serde_json::Value {
+    let mut value = match response {
         Response::Text(text) => serde_json::json!({
             "type": "text",
             "content": text,
@@ -773,7 +849,11 @@ fn trace_response_value(response: &Response) -> serde_json::Value {
             "code": error.code,
             "message": error.message,
         }),
+    };
+    if let Some(thinking) = thinking.filter(|thinking| !thinking.is_empty()) {
+        value["thinking"] = serde_json::Value::String(thinking.to_owned());
     }
+    value
 }
 
 fn unix_time_ms() -> u64 {
@@ -859,6 +939,8 @@ mod tests {
         snapshots: Mutex<Vec<Vec<Message>>>,
     }
 
+    struct ThinkingProvider;
+
     struct PendingProvider;
 
     struct FailingTool;
@@ -914,6 +996,23 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("mock 响应不足"))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ThinkingProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            events: tokio::sync::mpsc::UnboundedSender<crate::provider::ProviderEvent>,
+        ) -> Result<()> {
+            use crate::provider::ProviderEvent;
+
+            events.send(ProviderEvent::ThinkingDelta("先分析".to_owned()))?;
+            events.send(ProviderEvent::ThinkingDelta("，再回答".to_owned()))?;
+            events.send(ProviderEvent::TextDelta("最终回答".to_owned()))?;
+            Ok(())
         }
     }
 
@@ -977,6 +1076,75 @@ mod tests {
             .expect("第一个请求应响应取消")
             .expect("第一个请求任务不应 panic");
         assert_eq!(first_result.unwrap_err().to_string(), "请求已取消");
+    }
+
+    #[tokio::test]
+    async fn streams_thinking_before_text_and_persists_it_in_session_history() {
+        let provider: Arc<dyn Provider> = Arc::new(ThinkingProvider);
+        let session = test_session("thinking-stream");
+        let engine = LoopEngine::new(
+            provider.clone(),
+            ToolRegistry::new(),
+            test_context(provider),
+            session.clone(),
+        );
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut history = Vec::new();
+
+        let answer = engine
+            .run_turn_with_events_for_request(
+                &mut history,
+                "请先思考再回答".to_owned(),
+                Some(events),
+                CancellationToken::new(),
+                Some("thinking-request".to_owned()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "最终回答");
+        let captured = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+        assert!(matches!(captured[0], AgentEvent::TurnStarted));
+        assert_eq!(
+            captured
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ThinkingDelta(delta) => Some(delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["先分析", "，再回答"]
+        );
+        let thinking_finished = captured
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ThinkingFinished))
+            .expect("思考完成事件应在正文前发出");
+        let text_delta = captured
+            .iter()
+            .position(|event| matches!(event, AgentEvent::TextDelta(delta) if delta == "最终回答"))
+            .expect("正文增量应发出");
+        assert!(thinking_finished < text_delta);
+        assert!(
+            matches!(captured.last(), Some(AgentEvent::TurnCompleted { content }) if content == "最终回答")
+        );
+        assert_eq!(
+            history
+                .last()
+                .and_then(|message| message.thinking.as_deref()),
+            Some("先分析，再回答")
+        );
+        assert!(
+            session
+                .load_trace()
+                .await
+                .unwrap()
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    SessionTraceRecord::ModelResponse { response: Some(response), .. }
+                        if response["thinking"] == "先分析，再回答"
+                ))
+        );
     }
 
     #[tokio::test]

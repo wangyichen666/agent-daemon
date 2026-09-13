@@ -167,6 +167,11 @@ fn consume_ndjson_line(
         anyhow::bail!("Ollama 流返回错误: {error}");
     }
     if let Some(message) = chunk.message {
+        if let Some(thinking) = message.thinking.or(message.reasoning)
+            && !thinking.is_empty()
+        {
+            send_event(events, ProviderEvent::ThinkingDelta(thinking))?;
+        }
         if !message.content.is_empty() {
             send_event(events, ProviderEvent::TextDelta(message.content))?;
         }
@@ -223,6 +228,10 @@ struct OllamaMessage {
     #[serde(default)]
     content: String,
     #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<OllamaToolCall>,
 }
 
@@ -272,6 +281,22 @@ mod tests {
             panic!("缺少第二个开始事件");
         };
         assert_eq!(*exec_id, ExecutionIdentity::position(ApiType::Ollama, 1));
+    }
+
+    #[test]
+    fn emits_message_thinking_as_thinking_delta() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut position = 0;
+        consume_ndjson_line(
+            br#"{"message":{"thinking":"\u5148\u89c4\u5212"},"done":false}"#,
+            &mut position,
+            &events,
+        )
+        .unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ProviderEvent::ThinkingDelta("先规划".to_owned())
+        );
     }
 
     #[test]

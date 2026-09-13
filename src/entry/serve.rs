@@ -993,7 +993,10 @@ mod tests {
         assert!(WEB_APP.contains("permissions.set"));
         assert!(WEB_APP.contains("scheduleAgentTranscriptRender"));
         assert!(WEB_APP.contains("renderMarkdown"));
+        assert!(WEB_APP.contains("isTableSeparator"));
         assert!(WEB_APP.contains("safeMarkdownUrl"));
+        assert!(WEB_APP.contains("thinking_delta"));
+        assert!(WEB_APP.contains("thinking_finished"));
         assert!(WEB_APP.contains("工具动态 · "));
         assert!(WEB_APP.contains("workspace:"));
         assert!(WEB_APP.contains("sessionDayKey"));
@@ -1002,6 +1005,8 @@ mod tests {
         assert!(WEB_STYLES.contains(".session-day.is-collapsed"));
         assert!(WEB_STYLES.contains(".streaming-cursor"));
         assert!(WEB_STYLES.contains(".tool-details"));
+        assert!(WEB_STYLES.contains(".thinking-details"));
+        assert!(WEB_STYLES.contains(".message-content table"));
     }
 
     #[test]

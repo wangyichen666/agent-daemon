@@ -463,3 +463,13 @@
 - Agent Session 快照中的 `tool_calls` 与 `tool` 角色消息会被直接渲染；右侧 `activities` 也会展示工具状态。本轮应保留数据和状态，但默认通过折叠容器隐藏详情，审批卡仍保持可见。
 - 项目没有前端打包/npm 依赖；应在 `web/app.js` 内实现无外部依赖的安全 Markdown 渲染器，白名单 HTML 标签并限制链接协议，避免引入供应链或 XSS 风险。
 - 流式响应不能依赖“完成后重新加载快照”才能显示；当前 `text_delta` 已更新草稿对象，需确保渲染不会因快照刷新覆盖增量，并对长文本减少不必要的滚动/重绘开销。
+- 当前 `ProviderEvent` 只有 `TextDelta` 和工具调用事件，OpenAI/Anthropic/Ollama 的思考字段均未透传：OpenAI delta 只读 `content`，Anthropic 只处理 `text_delta`，Ollama 只读 `message.content`。
+- 可兼容地新增 `ThinkingDelta`：OpenAI 读取 `reasoning_content`/`reasoning`/`thinking`，Anthropic 读取 `thinking` content block 与 `thinking_delta`，Ollama 读取 `message.thinking`/`message.reasoning`。
+- 思考内容需写入 assistant Message 的可选字段，才能在 `chat.send` 完成后的快照刷新和历史 Session 查看中保留；Provider 出站序列化会忽略该本地字段。
+- daemon 事件应新增 `thinking_delta` 与 `thinking_finished`；LoopEngine 在首个正文增量前发出 finished，前端据此自动关闭思考折叠区。
+- OpenAI Chat Completions 的增量思考字段可从 `delta.reasoning_content`（兼容 `reasoning`/`thinking`）读取；Anthropic 在 thinking content block 起始和 `thinking_delta` 中分别携带片段；Ollama 在 NDJSON `message.thinking` 或 `message.reasoning` 中携带片段。
+- LoopEngine 的 provider 事件消费必须在同一异步 select 中转发增量，不能只在 provider future 完成后读取；`thinking_finished` 在正文首片段前或 provider 结束时补发，确保错误/工具调用也不会留下打开状态。
+- Session Message 增加可选 `thinking` 字段并带 serde 默认值，老 JSONL 无需迁移；各 provider 出站 wire serializer 不发送该本地审计字段。
+- Web 自定义 Markdown renderer 在识别代码围栏前识别“表头 + 分隔线”结构，表格单元格使用同一安全 inline renderer；分隔线至少三个连字符并支持冒号对齐标记。
+- 真实隔离 WebSocket 流测得思考首片段约 30ms 到达、第二片段约 1.5s、`thinking_finished` 与正文首片段约 3.0s、最终完成约 5.4s，证明页面可以观察到真实增量时序。
+- 隔离浏览器可访问性快照在思考阶段显示“思考过程 生成中”和“正在生成思考/正在生成”光标；后续快照显示“思考过程 已自动折叠”、标题和语义 `<table>`，表格不再以竖线文本呈现。

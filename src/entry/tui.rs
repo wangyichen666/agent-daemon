@@ -857,6 +857,12 @@ async fn handle_key(client: &DaemonClient, state: &mut TuiState, key: KeyEvent) 
 async fn handle_frame(state: &mut TuiState, turn_id: &RequestId, frame: ServerFrame) -> Result<()> {
     match frame {
         ServerFrame::Event(event) => match event.event {
+            EventKind::ThinkingDelta => {
+                state.status = format!("request={turn_id:?} · 模型思考中");
+            }
+            EventKind::ThinkingFinished => {
+                state.status = format!("request={turn_id:?} · 思考完成，开始输出回答");
+            }
             EventKind::TextDelta => {
                 if let Some(delta) = event.data["delta"].as_str() {
                     state.append_assistant(turn_id, delta);

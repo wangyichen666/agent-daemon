@@ -585,6 +585,12 @@
 
 | 错误 | 次数 | 处理 |
 |---|---:|---|
+| Anthropic 思考流单测使用非 ASCII 原始字节串，rustc 拒绝解析 | 1 | 改用 JSON `\\uXXXX` 转义，保持 SSE fixture 为 ASCII 字节串 |
+| Ollama 思考流单测同样使用非 ASCII 原始字节串 | 1 | 将 NDJSON fixture 改为 JSON Unicode 转义后重新执行格式检查 |
+| OpenAI 思考流单测使用非 ASCII 原始字节串 | 1 | 将 SSE fixture 改为 JSON Unicode 转义 |
+| CUA 通过 `evaluate` 直接给 textarea 的 `value` 赋值触发只读包装错误 | 1 | 改用 Playwright locator 的 `fill`，再用页面脚本只读取状态；不再重复该赋值方式 |
+| CUA 页面 `evaluate` 隔离上下文不提供 `MutationObserver` 构造器 | 1 | 改用 WebSocket 事件时间戳与页面定时读取完成验收，不依赖该 API |
+| 新增思考事件后 CLI/TUI/ACP 的 `EventKind` 匹配不完整，`cargo check --all-targets` 报非穷举 | 1 | 为非 Web 消费者补充忽略/状态处理分支，保留 Web 思考流展示 |
 | CUA 按可访问名称 `textbox[name=prompt]` 未匹配到 textarea | 2 | 改用稳定 DOM id `#prompt` 定位，后续不再使用无名 textbox 角色查询 |
 
 ### 当前验收记录
@@ -592,3 +598,43 @@
 - 隔离发布版验证响应首段到达时状态为“生成响应”、存在流式光标；完成后 Markdown 标题、列表、代码块和安全链接均生成语义 DOM。
 - 工具调用与工具输出数据仍保留在消息和活动状态中，但默认放入关闭的 `<details>`，用户可主动展开查看。
 - 全量测试 136/136、Clippy、rustfmt、Node 语法、嵌入资源测试和 diff 检查通过；release 已构建并安装到 PATH，准备提交推送。
+## Web Markdown 表格与思考流（2026-09-13）
+
+### 目标
+
+1. 正确渲染 Markdown 表格，避免被当作带竖线的普通文本。
+2. 将模型增量区分为思考流与正式回答流，并在页面按到达顺序实时展示。
+3. 思考结束后自动折叠思考区，正式回答继续流式输出；旧 Provider 无思考事件时保持兼容。
+
+### 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---:|---|
+| 0. 协议与 Provider 审计 | complete | 确认各 Provider 思考字段/增量形态和 daemon 事件透传边界 |
+| 1. Markdown 表格 | complete | 表头、分隔线、数据行和对齐标记安全渲染为 table |
+| 2. 思考/正文流 | complete | 新事件实时显示，思考完成自动折叠，正文不被覆盖 |
+| 3. 回归与交付 | complete | Provider/daemon/Web 测试、浏览器验收、构建安装和推送完成 |
+
+### 约束
+
+- 保持现有 `text_delta`、工具调用、审批、取消和 Session trace 兼容；新增事件必须可选。
+- 不把思考内容写入最终 assistant 正文，避免刷新快照时错位；历史记录没有思考字段时正常显示正文。
+- Markdown 表格单元格必须经过现有安全内联渲染，不能引入未转义 HTML。
+
+### 错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+
+### 当前验收记录
+
+- OpenAI `reasoning_content`、Anthropic thinking content block/`thinking_delta`、Ollama `message.thinking`/`reasoning` 均已归一为 Provider 思考增量；无思考字段的旧 Provider 仍走原有正文流。
+- daemon 新增 `thinking_delta` 与 `thinking_finished` 事件；首个正文增量前保证发出思考完成事件，Session assistant 消息和 model response trace 均保留独立 thinking 字段。
+- Markdown 表格支持表头、分隔线、数据行与左右/居中对齐，单元格继续经过安全 inline Markdown 渲染。
+- 真实隔离 WebSocket 记录显示事件按 `thinking_delta → thinking_finished → text_delta → turn_completed` 到达，且思考与正文之间存在真实时间间隔，不是完成后的伪流式。
+- 隔离浏览器可访问性树确认思考阶段显示“生成中”和流式光标；思考完成后显示“已自动折叠”，正文被解析为标题、表格、行和单元格。
+
+### 交付记录
+
+- `cargo test --all-targets` 140/140、严格 Clippy、rustfmt、Node 语法与 diff 检查通过；release 已重新构建并安装到 `/Users/pilot/.cargo/bin/my-agent` 与 `/Users/pilot/.local/bin/my-agent`，两份二进制一致。
+- 隔离 Web/WS 验收服务、模拟 Provider、脚本和工作区已停止并移入 `/Users/pilot/.Trash`；用户要求停止的 127.0.0.1:8787 旧进程 PID 64165 已结束，端口已释放。

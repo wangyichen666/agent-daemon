@@ -420,7 +420,11 @@ fn forward_event(
                     })),
             )))
         }
-        EventKind::TurnStarted | EventKind::TurnCompleted | EventKind::ApprovalRequired => None,
+        EventKind::ThinkingDelta
+        | EventKind::ThinkingFinished
+        | EventKind::TurnStarted
+        | EventKind::TurnCompleted
+        | EventKind::ApprovalRequired => None,
     };
     if let Some(update) = update {
         connection.send_notification(SessionNotification::new(session_id.clone(), update))?;

@@ -30,6 +30,7 @@
     collapsedDays: new Set(),
     permissionMode: null,
     transcriptRenderPending: false,
+    thinkingFinished: false,
   };
 
   class RpcSocket {
@@ -500,6 +501,12 @@
       </details>`;
     }
     const content = message.content == null ? "" : String(message.content);
+    const thinking = message.thinking == null ? "" : String(message.thinking);
+    const thinkingOpen = message === state.draftAssistant && !state.thinkingFinished && state.activeRequest;
+    const thinkingDetails = thinking ? `<details class="thinking-details"${thinkingOpen ? " open" : ""}>
+      <summary><span>思考过程</span><small>${thinkingOpen ? "生成中" : "已自动折叠"}</small></summary>
+      <div class="thinking-content">${renderMarkdown(thinking)}${thinkingOpen ? `<span class="streaming-cursor" aria-label="正在生成思考"></span>` : ""}</div>
+    </details>` : "";
     const renderedContent = content
       ? role === "assistant" ? renderMarkdown(content) : escapeHtml(content)
       : "";
@@ -511,6 +518,7 @@
       : "";
     return `<article class="message ${escapeAttr(role)}">
       <div class="message-label"><span>${escapeHtml(label)}</span></div>
+      ${thinkingDetails}
       ${contentHtml}
       ${toolDetails}
     </article>`;
@@ -539,6 +547,22 @@
     };
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
+      if (line.includes("|") && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+        flushParagraph(); flushList(); flushQuote();
+        const headers = parseTableCells(line);
+        const alignments = parseTableCells(lines[index + 1]).map(tableAlignment);
+        const rows = [];
+        index += 2;
+        while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+          rows.push(parseTableCells(lines[index]));
+          index += 1;
+        }
+        index -= 1;
+        const headerHtml = headers.map((cell, cellIndex) => `<th class="${alignments[cellIndex] || ""}">${renderInlineMarkdown(cell)}</th>`).join("");
+        const rowHtml = rows.map((row) => `<tr>${headers.map((_, cellIndex) => `<td class="${alignments[cellIndex] || ""}">${renderInlineMarkdown(row[cellIndex] || "")}</td>`).join("")}</tr>`).join("");
+        blocks.push(`<table><thead><tr>${headerHtml}</tr></thead>${rowHtml ? `<tbody>${rowHtml}</tbody>` : ""}</table>`);
+        continue;
+      }
       const fence = line.match(/^ {0,3}(```+|~~~+)\s*([^ ]*)\s*$/);
       if (fence) {
         flushParagraph(); flushList(); flushQuote();
@@ -600,6 +624,24 @@
     return blocks.join("");
   }
 
+  function parseTableCells(line) {
+    const value = String(line ?? "").trim().replace(/^\|/, "").replace(/\|$/, "");
+    return value.split("|").map((cell) => cell.trim());
+  }
+
+  function isTableSeparator(line) {
+    const cells = parseTableCells(line);
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  }
+
+  function tableAlignment(cell) {
+    const value = String(cell ?? "");
+    if (value.startsWith(":") && value.endsWith(":")) return "align-center";
+    if (value.endsWith(":")) return "align-right";
+    if (value.startsWith(":")) return "align-left";
+    return "";
+  }
+
   function renderInlineMarkdown(value) {
     const source = String(value ?? "");
     const tokenPattern = /(`[^`]+`|\[[^\]]+\]\([^\s)]+(?:\s+["'][^"']*["'])?\)|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_)/g;
@@ -651,6 +693,7 @@
       state.agentSessionId = snapshot.session_id;
       state.agentSnapshot = snapshot;
       state.activities = [];
+      state.thinkingFinished = false;
       renderAgentTranscript();
       renderActivities();
       updateAgentSessionUi();
@@ -681,6 +724,7 @@
     state.agentSessionId = null;
     state.agentSnapshot = null;
     state.activities = [];
+    state.thinkingFinished = false;
     renderAgentTranscript();
     renderActivities();
     updateAgentSessionUi();
@@ -708,6 +752,7 @@
       state.agentSnapshot.messages ||= [];
       state.agentSnapshot.messages.push({ role: "user", content: prompt });
       state.draftAssistant = { role: "assistant", content: "" };
+      state.thinkingFinished = false;
       state.agentSnapshot.messages.push(state.draftAssistant);
       state.activities = [];
       addActivity("turn", "任务已提交", "Agent 正在理解目标并规划下一步");
@@ -729,7 +774,7 @@
     } catch (error) {
       state.agentSnapshot ||= { messages: [] };
       state.agentSnapshot.messages ||= [];
-      if (state.draftAssistant && !state.draftAssistant.content) {
+      if (state.draftAssistant && !state.draftAssistant.content && !state.draftAssistant.thinking) {
         const draftIndex = state.agentSnapshot.messages.indexOf(state.draftAssistant);
         if (draftIndex >= 0) state.agentSnapshot.messages.splice(draftIndex, 1);
       }
@@ -754,6 +799,16 @@
     if (event === "text_delta") {
       state.draftAssistant ||= { role: "assistant", content: "" };
       state.draftAssistant.content += data.delta || "";
+      scheduleAgentTranscriptRender();
+      setAgentStatus("running", "生成响应");
+    } else if (event === "thinking_delta") {
+      state.draftAssistant ||= { role: "assistant", content: "" };
+      state.draftAssistant.thinking = (state.draftAssistant.thinking || "") + (data.delta || "");
+      state.thinkingFinished = false;
+      scheduleAgentTranscriptRender();
+      setAgentStatus("running", "思考中");
+    } else if (event === "thinking_finished") {
+      state.thinkingFinished = true;
       scheduleAgentTranscriptRender();
       setAgentStatus("running", "生成响应");
     } else if (event === "tool_started") {
@@ -838,6 +893,7 @@
     state.agentSessionId = state.inspectedSessionId;
     state.agentSnapshot = JSON.parse(JSON.stringify(state.inspectedSnapshot));
     state.activities = [];
+    state.thinkingFinished = false;
     renderAgentTranscript();
     renderActivities();
     updateAgentSessionUi();
@@ -961,6 +1017,7 @@
     state.inspectedSnapshot = null;
     state.traces = [];
     state.permissionMode = null;
+    state.thinkingFinished = false;
     state.inspectedMessageOffset = 0;
     state.inspectedMessageTotal = 0;
     state.inspectedMessageHasMore = false;

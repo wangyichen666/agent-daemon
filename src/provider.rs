@@ -34,6 +34,8 @@ pub struct Message {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +51,7 @@ impl Message {
         Self {
             role,
             content: Some(content.into()),
+            thinking: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -60,6 +63,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: None,
+            thinking: None,
             tool_calls: calls,
             tool_call_id: None,
             name: None,
@@ -71,6 +75,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: Some(content.into()),
+            thinking: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(call.id.clone()),
             name: Some(call.name.clone()),
@@ -82,10 +87,41 @@ impl Message {
         Self {
             role: Role::User,
             content: Some(content.into()),
+            thinking: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
             image_urls,
+        }
+    }
+
+    pub fn assistant_with_thinking(content: impl Into<String>, thinking: Option<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: Some(content.into()),
+            thinking,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            image_urls: Vec::new(),
+        }
+    }
+
+    pub fn assistant_tool_calls_with_thinking(
+        calls: Vec<ToolCall>,
+        thinking: Option<String>,
+    ) -> Self {
+        if thinking.is_none() {
+            return Self::assistant_tool_calls(calls);
+        }
+        Self {
+            role: Role::Assistant,
+            content: None,
+            thinking,
+            tool_calls: calls,
+            tool_call_id: None,
+            name: None,
+            image_urls: Vec::new(),
         }
     }
 }
@@ -263,6 +299,7 @@ impl ToolCallStreamError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderEvent {
     TextDelta(String),
+    ThinkingDelta(String),
     ToolCallStarted {
         exec_id: ExecutionIdentity,
         name: String,

@@ -78,6 +78,8 @@ pub struct RpcError {
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     TurnStarted,
+    ThinkingDelta,
+    ThinkingFinished,
     TextDelta,
     ToolStarted,
     ToolFinished,

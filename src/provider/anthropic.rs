@@ -290,6 +290,13 @@ fn start_content_block(
                 send_event(events, ProviderEvent::TextDelta(text.to_owned()))?;
             }
         }
+        Some("thinking") => {
+            if let Some(thinking) = block.get("thinking").and_then(Value::as_str)
+                && !thinking.is_empty()
+            {
+                send_event(events, ProviderEvent::ThinkingDelta(thinking.to_owned()))?;
+            }
+        }
         Some("tool_use") => {
             let Some(id) = block.get("id").and_then(Value::as_str) else {
                 return emit_failure(events, "missing_id", "Anthropic tool_use 缺少 id");
@@ -328,6 +335,13 @@ fn consume_content_delta(
         Some("text_delta") => {
             if let Some(text) = delta.get("text").and_then(Value::as_str) {
                 send_event(events, ProviderEvent::TextDelta(text.to_owned()))?;
+            }
+        }
+        Some("thinking_delta") => {
+            if let Some(thinking) = delta.get("thinking").and_then(Value::as_str)
+                && !thinking.is_empty()
+            {
+                send_event(events, ProviderEvent::ThinkingDelta(thinking.to_owned()))?;
             }
         }
         Some("input_json_delta") => {
@@ -439,5 +453,31 @@ mod tests {
             captured[3],
             ProviderEvent::ToolCallCompleted { .. }
         ));
+    }
+
+    #[test]
+    fn emits_thinking_content_block_deltas() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut state = StreamState::default();
+        consume_sse_line(
+            br#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"\u5148\u5206\u6790"}}"#,
+            &mut state,
+            &events,
+        )
+        .unwrap();
+        consume_sse_line(
+            br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\u518d\u56de\u7b54"}}"#,
+            &mut state,
+            &events,
+        )
+        .unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ProviderEvent::ThinkingDelta("先分析".to_owned())
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ProviderEvent::ThinkingDelta("再回答".to_owned())
+        );
     }
 }

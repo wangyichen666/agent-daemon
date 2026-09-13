@@ -1444,6 +1444,8 @@ fn send_result(
 fn agent_event_update(event: AgentEvent) -> ActiveRequestUpdate {
     let (kind, data) = match event {
         AgentEvent::TurnStarted => (EventKind::TurnStarted, json!({})),
+        AgentEvent::ThinkingDelta(delta) => (EventKind::ThinkingDelta, json!({"delta": delta})),
+        AgentEvent::ThinkingFinished => (EventKind::ThinkingFinished, json!({})),
         AgentEvent::TextDelta(delta) => (EventKind::TextDelta, json!({"delta": delta})),
         AgentEvent::ToolStarted {
             call_id,
