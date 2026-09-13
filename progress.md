@@ -265,3 +265,10 @@
 - [x] 思考区域在生成期间自动展开并显示光标，收到 `thinking_finished` 后自动折叠，正文继续显示增量光标。
 - [x] 新增 Provider 与 LoopEngine 回归，验证思考片段顺序、正文切换、历史持久化和 trace；全量 `cargo test --all-targets` 140/140、Clippy、rustfmt、Node 语法和 diff 检查通过。
 - [x] 隔离 WebSocket 与浏览器验收确认真实时间间隔的思考→正文流，以及最终语义 Markdown `<table>`；验收用的服务、脚本和临时工作区已停止并移入可恢复废纸篓。
+
+# 2026-09-13 Web 工作台布局优化
+
+- [x] 移除 Agent 工作台无必要的英文眉题，保留 Session 查看页的记录上下文。
+- [x] 扩大左侧对话栅格比例并压缩右侧实时辅助栏，模型 assistant/tool 卡片改为接近内容区满宽。
+- [x] 收紧标题区和 transcript 留白，保持 composer、工作目录、Session 和活动状态操作可用。
+- [x] 完成 1440px 桌面与窄屏浏览器验收；格式、Node 语法、diff 检查和发布版构建安装通过，已提交并推送。
