@@ -480,3 +480,10 @@
 - `.agent-layout` 改为左侧 `minmax(0, 1fr)`、右侧 `minmax(250px, 290px)`，右栏继续承载工作目录、Session 入口和实时活动；桌面 1440px 视口实测左侧约 1102px、右侧约 290px。
 - assistant 与 tool details 消息覆盖默认 86% 最大宽度，模型输出卡片和工具折叠条可利用完整 transcript 内容宽度；用户消息仍保持右对齐的紧凑气泡。
 - 标题区与 transcript padding 收紧，减少工具/消息之间的空白，同时保留 820px 单列断点，窄屏下模型输出仍占据主要可视区域。
+
+# 2026-09-13 Web 工作台截图标注优化
+
+- 截图红色标注对应三处正式 UI 意图：顶部操作区使用“＋新建任务”；工作目录与权限模式靠近 composer；中间 transcript 明确作为模型响应区域。
+- 保留 workspace-label、permission-label 和两个 trigger 的既有 DOM ID，移动节点不会影响 setAgentControls、目录切换、权限 RPC 或禁用状态。
+- 顶部选择器移动后，composer context 在桌面横向排列，在 820px 以下自动换行；390px 视口仍能显示“工作目录 / 权限模式”标签和当前值。
+- 通过隔离模拟 Ollama 实际发送一轮任务，页面在思考增量期间显示“生成中”，随后自动折叠思考并显示 Markdown 表格响应，证明本轮只改变布局和提示文案。

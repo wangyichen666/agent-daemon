@@ -24,16 +24,7 @@
         </nav>
 
         <div class="topbar-actions">
-          <button id="workspace-trigger" class="workspace-trigger" type="button" title="切换 Agent 工作目录">
-            <span>工作目录</span>
-            <strong id="workspace-label">正在读取…</strong>
-            <i>⌄</i>
-          </button>
-          <button id="permission-trigger" class="permission-trigger" type="button" title="切换 Agent 权限模式">
-            <span>权限模式</span>
-            <strong id="permission-label">正在读取…</strong>
-            <i>⌄</i>
-          </button>
+          <button id="new-agent-session" class="primary-button compact topbar-new-task" type="button">＋ 新建任务</button>
           <span id="connection" class="connection is-connecting"><i></i><span>正在连接 daemon</span></span>
           <button id="settings" class="icon-button" type="button" title="连接设置">•••</button>
         </div>
@@ -50,15 +41,14 @@
                 </div>
                 <div class="heading-actions">
                   <button id="cancel-turn" class="quiet-button danger hidden" type="button">停止本轮</button>
-                  <button id="new-agent-session" class="primary-button compact" type="button">＋ 新建任务</button>
                 </div>
               </div>
 
-              <div id="agent-transcript" class="transcript" aria-live="polite" aria-relevant="additions text">
+              <div id="agent-transcript" class="transcript" aria-label="模型响应区域" aria-live="polite" aria-relevant="additions text">
                 <div class="empty-state agent-empty">
                   <span class="empty-orbit">✦</span>
                   <h2>让 Agent 真正在项目里工作</h2>
-                  <p>选择一个本地目录，Agent 的读取、编辑、命令执行和 Session 都会严格绑定在这个工作区。</p>
+                  <p>模型响应会在这里实时展示。选择本地目录后，Agent 的读取、编辑、命令执行和 Session 都会严格绑定在这个工作区。</p>
                   <div class="starter-grid">
                     <button type="button" data-starter="分析这个项目的结构，并告诉我最值得优先改进的三个地方。">分析项目结构</button>
                     <button type="button" data-starter="运行项目测试，定位失败原因并修复。">运行并修复测试</button>
@@ -71,8 +61,16 @@
                 <textarea id="prompt" rows="3" placeholder="描述你希望 Agent 在当前工作目录完成的任务…" disabled></textarea>
                 <div class="composer-footer">
                   <div class="composer-context">
-                    <span class="context-dot"></span>
-                    <span id="composer-workspace">尚未连接工作目录</span>
+                    <button id="workspace-trigger" class="workspace-trigger" type="button" title="切换 Agent 工作目录">
+                      <span>工作目录</span>
+                      <strong id="workspace-label">尚未连接工作目录</strong>
+                      <i>⌄</i>
+                    </button>
+                    <button id="permission-trigger" class="permission-trigger" type="button" title="切换 Agent 权限模式">
+                      <span>权限模式</span>
+                      <strong id="permission-label">正在读取…</strong>
+                      <i>⌄</i>
+                    </button>
                   </div>
                   <div class="composer-actions">
                     <span><kbd>⌘</kbd><kbd>Enter</kbd> 发送</span>

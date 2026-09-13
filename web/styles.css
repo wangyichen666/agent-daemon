@@ -100,6 +100,7 @@ h1, h2, h3, p { margin: 0; }
 .primary-button:hover, .send-button:hover { transform: translateY(-1px); box-shadow: 0 11px 24px rgba(13,102,91,.22); }
 .primary-button:disabled, .send-button:disabled { opacity: .44; cursor: not-allowed; transform: none; }
 .primary-button.compact { padding: 10px 13px; font-size: 12px; }
+.topbar-new-task { min-height: 38px; white-space: nowrap; }
 .quiet-button { padding: 0 12px; font-size: 12px; }
 .quiet-button.danger { color: var(--red); }
 .full-width { width: 100%; }
@@ -111,6 +112,7 @@ h1, h2, h3, p { margin: 0; }
 .empty-orbit { display: grid; place-items: center; width: 60px; height: 60px; margin-bottom: 18px; border: 1px solid rgba(13,102,91,.25); border-radius: 50%; color: var(--teal); background: var(--teal-soft); font-size: 24px; }
 .empty-state h2, .empty-state h3 { color: var(--ink); font-family: Georgia, serif; font-size: 24px; font-weight: 500; }
 .empty-state p { max-width: 500px; margin-top: 10px; line-height: 1.65; font-size: 13px; }
+.agent-empty p { max-width: 640px; }
 .starter-grid { width: min(620px, 100%); margin-top: 24px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
 .starter-grid button { padding: 13px 11px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,253,248,.68); cursor: pointer; color: #40514b; font-size: 11px; }
 .starter-grid button:hover { border-color: rgba(13,102,91,.35); color: var(--teal); background: var(--white); }
@@ -177,9 +179,11 @@ h1, h2, h3, p { margin: 0; }
 .composer:focus-within { border-color: rgba(13,102,91,.55); box-shadow: 0 12px 35px rgba(13,102,91,.12); }
 .composer textarea { display: block; width: 100%; min-height: 88px; max-height: 220px; resize: vertical; padding: 16px 17px 8px; border: 0; outline: 0; color: var(--ink); background: transparent; line-height: 1.55; }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 9px 9px 16px; color: var(--muted); font-size: 10px; }
-.composer-context { min-width: 0; display: flex; align-items: center; gap: 7px; }
-.composer-context > span:last-child { min-width: 0; max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.context-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--teal-bright); }
+.composer-context { min-width: 0; flex: 1 1 auto; display: flex; align-items: center; gap: 8px; }
+.composer-context .workspace-trigger { flex: 1 1 220px; max-width: 330px; }
+.composer-context .permission-trigger { flex: 0 1 150px; min-width: 126px; }
+.composer-context .workspace-trigger, .composer-context .permission-trigger { min-height: 34px; padding: 5px 9px; }
+.composer-context .workspace-trigger strong, .composer-context .permission-trigger strong { font-size: 10px; }
 .composer-actions { flex: none; display: flex; align-items: center; gap: 12px; }
 kbd { padding: 2px 4px; margin-right: 2px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--paper); font: inherit; }
 .send-button { padding: 10px 15px; }
@@ -327,8 +331,12 @@ dialog::backdrop { background: rgba(21,31,28,.32); backdrop-filter: blur(5px); }
   .transcript { padding: 20px 16px; }
   .message { max-width: 94%; }
   .composer { margin: 0 10px 10px; }
+  .composer-footer { flex-wrap: wrap; gap: 8px; }
+  .composer-context { flex: 1 1 100%; width: 100%; }
+  .composer-context .workspace-trigger { max-width: none; }
+  .composer-context .permission-trigger { max-width: 42%; }
+  .composer-actions { margin-left: auto; }
   .starter-grid { grid-template-columns: 1fr; }
-  .composer-context { display: none; }
 }
 
 @media (max-width: 520px) {
@@ -339,6 +347,10 @@ dialog::backdrop { background: rgba(21,31,28,.32); backdrop-filter: blur(5px); }
   .permission-trigger strong { grid-row: 1 / 3; align-self: center; }
   .workspace-trigger > span { display: none; }
   .workspace-trigger strong { grid-row: 1 / 3; align-self: center; }
+  .composer-context .permission-trigger { min-width: 110px; max-width: 40%; }
+  .composer-context .workspace-trigger strong, .composer-context .permission-trigger strong { font-size: 9px; }
+  .composer-context .workspace-trigger > span, .composer-context .permission-trigger > span { display: block; }
+  .composer-context .workspace-trigger strong, .composer-context .permission-trigger strong { grid-row: auto; align-self: auto; }
   .primary-nav button { padding-inline: 11px; }
   .heading-actions { flex-direction: column-reverse; align-items: flex-end; }
   .composer-actions > span { display: none; }

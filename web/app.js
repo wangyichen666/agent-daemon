@@ -172,7 +172,6 @@
     $("#workspace-label").textContent = label;
     $("#workspace-label").title = state.workspace;
     $("#workspace-path").textContent = state.workspace || "—";
-    $("#composer-workspace").textContent = state.workspace || "尚未连接工作目录";
     $("#session-workspace").textContent = state.workspace || "尚未连接工作目录";
   }
 
@@ -476,7 +475,7 @@
     return `<div class="empty-state agent-empty">
       <span class="empty-orbit">✦</span>
       <h2>让 Agent 真正在项目里工作</h2>
-      <p>当前任务将绑定到 <strong>${escapeHtml(state.workspace || "所选工作目录")}</strong>。你可以直接描述目标，Agent 会读取代码、执行工具并完成验证。</p>
+      <p>模型响应会在这里实时展示。当前任务将绑定到 <strong>${escapeHtml(state.workspace || "所选工作目录")}</strong>，你可以直接描述目标，Agent 会读取代码、执行工具并完成验证。</p>
       <div class="starter-grid">
         <button type="button" data-starter="分析这个项目的结构，并告诉我最值得优先改进的三个地方。">分析项目结构</button>
         <button type="button" data-starter="运行项目测试，定位失败原因并修复。">运行并修复测试</button>
