@@ -5,18 +5,35 @@
   const $$ = (selector) => [...document.querySelectorAll(selector)];
   const state = {
     rpc: null,
+    connected: false,
+    workspace: "",
+    defaultWorkspace: "",
+    browsePath: "",
+    browseParent: null,
     sessions: [],
-    selectedId: null,
-    snapshot: null,
+    agentSessionId: null,
+    inspectedSessionId: null,
+    agentSnapshot: null,
+    inspectedSnapshot: null,
     traces: [],
+    inspectedMessageOffset: 0,
+    inspectedMessageTotal: 0,
+    inspectedMessageHasMore: false,
+    inspectedTraceOffset: 0,
+    inspectedTraceTotal: 0,
+    inspectedTraceHasMore: false,
     traceFilter: "all",
     activeRequest: null,
     draftAssistant: null,
+    activities: [],
+    activeView: "agent",
+    collapsedDays: new Set(),
   };
 
   class RpcSocket {
-    constructor(token) {
+    constructor(token, workspace) {
       this.token = token;
+      this.workspace = workspace;
       this.nextId = 1;
       this.pending = new Map();
       this.socket = null;
@@ -27,16 +44,20 @@
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         const socket = new WebSocket(`${protocol}//${location.host}/ws`);
         this.socket = socket;
-        const timeout = setTimeout(() => reject(new Error("连接 daemon 超时")), 5000);
+        const timeout = setTimeout(() => reject(new Error("连接 daemon 超时")), 8000);
         socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({ type: "connect", token: this.token || undefined }));
+          socket.send(JSON.stringify({
+            type: "connect",
+            token: this.token || undefined,
+            workspace: this.workspace || undefined,
+          }));
         });
         socket.addEventListener("message", (event) => {
           let frame;
           try { frame = JSON.parse(event.data); } catch { return; }
           if (frame.type === "connected") {
             clearTimeout(timeout);
-            resolve();
+            resolve(frame.workspace || this.workspace);
             return;
           }
           if (frame.type === "error") {
@@ -44,6 +65,7 @@
             reject(new Error(frame.error || "连接失败"));
             return;
           }
+          if (frame.type === "recovery" || frame.type === "recovery_error") return;
           const id = frame.frame === "event" ? frame.request_id : frame.id;
           const pending = this.pending.get(String(id));
           if (!pending) return;
@@ -59,7 +81,11 @@
           clearTimeout(timeout);
           for (const pending of this.pending.values()) pending.reject(new Error("WebSocket 已断开"));
           this.pending.clear();
-          if (state.rpc === this) setConnection("error", "连接已断开");
+          if (state.rpc === this) {
+            state.connected = false;
+            setConnection("error", "连接已断开");
+            setAgentControls();
+          }
         });
         socket.addEventListener("error", () => reject(new Error("无法连接 Web 服务")));
       });
@@ -80,44 +106,89 @@
     close() { this.socket?.close(); }
   }
 
-  async function connect() {
+  async function bootstrap() {
+    const requested = new URL(location.href).searchParams.get("workspace")
+      || localStorage.getItem("my-agent-workspace")
+      || "";
+    try {
+      const health = await fetchJson("/health");
+      state.defaultWorkspace = health.workspace || "";
+    } catch (error) {
+      setConnection("error", error.message);
+    }
+    await connect(requested || state.defaultWorkspace);
+  }
+
+  async function connect(workspace = state.workspace) {
     state.rpc?.close();
-    setConnection("connecting", "正在连接 daemon");
-    const rpc = new RpcSocket(localStorage.getItem("my-agent-token") || "");
+    state.connected = false;
+    setConnection("connecting", "正在连接工作区");
+    setAgentControls();
+    const rpc = new RpcSocket(apiToken(), workspace);
     state.rpc = rpc;
     try {
-      await rpc.connect();
-      setConnection("online", "daemon 已连接");
-      enableControls(true);
+      const connectedWorkspace = await rpc.connect();
+      if (state.rpc !== rpc) return;
+      state.workspace = connectedWorkspace || workspace;
+      state.connected = true;
+      rememberWorkspace(state.workspace);
+      updateWorkspaceUrl(state.workspace);
+      updateWorkspaceUi();
+      setConnection("online", "Agent 已连接");
+      setAgentControls();
       await refreshSessions();
     } catch (error) {
-      enableControls(false);
-      setConnection("error", error.message);
-      toast(`${error.message}。如已设置 API Token，请在连接设置中填写。`);
+      if (state.rpc !== rpc) return;
+      state.connected = false;
+      setConnection("error", "工作区连接失败");
+      setAgentControls();
+      toast(`${error.message}。请检查目录或连接设置。`);
     }
   }
 
   function setConnection(mode, label) {
     const node = $("#connection");
     node.className = `connection is-${mode}`;
-    node.lastChild.textContent = label;
+    node.querySelector("span").textContent = label;
   }
 
-  function enableControls(enabled) {
-    $("#new-session").disabled = !enabled;
-    $("#prompt").disabled = !enabled || !state.selectedId;
-    $("#send").disabled = !enabled || !state.selectedId;
+  function setAgentControls() {
+    const ready = state.connected && !state.activeRequest;
+    $("#new-agent-session").disabled = !state.connected || Boolean(state.activeRequest);
+    $("#prompt").disabled = !ready;
+    $("#send").disabled = !ready;
+    $("#inspect-current").disabled = !state.agentSessionId;
+    $("#workspace-trigger").disabled = Boolean(state.activeRequest);
+    $("#change-workspace").disabled = Boolean(state.activeRequest);
   }
 
-  async function refreshSessions(preferredId = state.selectedId) {
-    const { promise } = state.rpc.request("session.list");
-    const result = await promise;
+  function updateWorkspaceUi() {
+    const label = directoryName(state.workspace) || "选择目录";
+    $("#workspace-label").textContent = label;
+    $("#workspace-label").title = state.workspace;
+    $("#workspace-path").textContent = state.workspace || "—";
+    $("#composer-workspace").textContent = state.workspace || "尚未连接工作目录";
+    $("#session-workspace").textContent = state.workspace || "尚未连接工作目录";
+  }
+
+  async function refreshSessions() {
+    if (!state.connected) return;
+    const result = await state.rpc.request("session.list").promise;
     state.sessions = result.sessions || [];
     renderSessions();
-    const next = state.sessions.some((item) => item.id === preferredId)
-      ? preferredId
-      : state.sessions[0]?.id;
-    if (next) await selectSession(next, false);
+
+    if (!state.sessions.some((item) => item.id === state.agentSessionId)) {
+      state.agentSessionId = state.sessions[0]?.id || null;
+    }
+    if (state.agentSessionId) await loadAgentSession(state.agentSessionId);
+    else resetAgentSession();
+
+    if (!state.sessions.some((item) => item.id === state.inspectedSessionId)) {
+      state.inspectedSessionId = state.sessions[0]?.id || null;
+    }
+    if (state.activeView === "sessions" && state.inspectedSessionId) {
+      await inspectSession(state.inspectedSessionId, false);
+    }
   }
 
   function renderSessions() {
@@ -126,53 +197,232 @@
       `${session.id} ${session.preview || ""}`.toLocaleLowerCase().includes(query)
     );
     $("#session-count").textContent = state.sessions.length;
-    $("#session-list").innerHTML = filtered.length
-      ? filtered.map((session) => `
-        <button class="session-item ${session.id === state.selectedId ? "active" : ""}" data-session="${escapeAttr(session.id)}">
-          <span class="session-row">
-            <i class="dot ${escapeAttr(session.status || "idle")}"></i>
-            <strong>${escapeHtml(shortId(session.id))}</strong>
-          </span>
-          <p>${escapeHtml(session.preview || "空白 Session")}</p>
-          <small>${session.message_count || 0} 条消息 · ${formatRelative(session.updated_at)}</small>
-        </button>`).join("")
-      : `<div class="trace-empty">没有匹配的 Session。</div>`;
-    $$("[data-session]").forEach((button) => button.addEventListener("click", () => selectSession(button.dataset.session)));
+    if (!filtered.length) {
+      $("#session-list").innerHTML = `<div class="trace-empty">${state.connected ? "没有匹配的 Session。" : "连接工作区后查看 Session。"}</div>`;
+      return;
+    }
+    const groups = new Map();
+    filtered.forEach((session) => {
+      const day = sessionDayKey(session);
+      if (!groups.has(day)) groups.set(day, []);
+      groups.get(day).push(session);
+    });
+    $("#session-list").innerHTML = [...groups.entries()].sort(([left], [right]) => right.localeCompare(left)).map(([day, sessions]) => `
+      <section class="session-day ${state.collapsedDays.has(day) ? "is-collapsed" : ""}" data-day="${escapeAttr(day)}">
+        <button class="session-day-toggle" data-day-toggle="${escapeAttr(day)}" type="button" aria-expanded="${!state.collapsedDays.has(day)}">
+          <span class="day-title"><i>▾</i><strong>${escapeHtml(sessionDayLabel(day))}</strong><small>${sessions.length} 个 Session</small></span>
+          <span class="day-chevron">⌄</span>
+        </button>
+        <div class="session-day-list">${sessions.map(renderSessionItem).join("")}</div>
+      </section>`).join("");
+    $$('[data-session]').forEach((button) => button.addEventListener("click", () => inspectSession(button.dataset.session)));
+    $$('[data-day-toggle]').forEach((button) => button.addEventListener("click", () => toggleSessionDay(button.dataset.dayToggle)));
   }
 
-  async function selectSession(sessionId, rerenderList = true) {
-    state.selectedId = sessionId;
-    state.draftAssistant = null;
-    if (rerenderList) renderSessions();
-    $("#conversation-title").textContent = shortId(sessionId, 34);
-    $("#conversation-meta").textContent = "正在读取 Session 快照与执行链路…";
-    enableControls(true);
+  function renderSessionItem(session) {
+    return `<button class="session-item ${session.id === state.inspectedSessionId ? "active" : ""}" data-session="${escapeAttr(session.id)}">
+      <span class="session-row">
+        <i class="dot ${escapeAttr(session.status || "idle")}"></i>
+        <strong>${escapeHtml(shortId(session.id))}</strong>
+      </span>
+      <p>${escapeHtml(session.preview || "空白 Session")}</p>
+      <small>${session.message_count || 0} 条消息 · ${formatRelative(session.updated_at)}</small>
+    </button>`;
+  }
+
+  function toggleSessionDay(day) {
+    if (state.collapsedDays.has(day)) state.collapsedDays.delete(day);
+    else state.collapsedDays.add(day);
+    renderSessions();
+  }
+
+  function sessionDayKey(session) {
+    const timestamp = session.updated_at || session.modified_at;
+    if (!timestamp) return todaySessionDayKey();
+    const date = new Date(timestamp * 1000);
+    if (Number.isNaN(date.getTime())) return "unknown";
+    return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+  }
+
+  function todaySessionDayKey() {
+    const today = new Date();
+    return [today.getFullYear(), String(today.getMonth() + 1).padStart(2, "0"), String(today.getDate()).padStart(2, "0")].join("-");
+  }
+
+  function sessionDayLabel(day) {
+    if (day === "unknown") return "日期未知";
+    const [year, month, date] = day.split("-").map(Number);
+    const value = new Date(year, month - 1, date);
+    const today = new Date();
+    const todayKey = todaySessionDayKey();
+    if (day === todayKey) return "今天";
+    const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+    const yesterdayKey = [yesterday.getFullYear(), String(yesterday.getMonth() + 1).padStart(2, "0"), String(yesterday.getDate()).padStart(2, "0")].join("-");
+    if (day === yesterdayKey) return "昨天";
+    return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(value);
+  }
+
+  async function loadAgentSession(sessionId) {
     try {
-      const snapshotCall = state.rpc.request("session.load", { session_id: sessionId }).promise;
-      const traceCall = state.rpc.request("session.trace", { session_id: sessionId }).promise;
-      const [snapshot, trace] = await Promise.all([snapshotCall, traceCall]);
-      if (state.selectedId !== sessionId) return;
-      state.snapshot = snapshot;
+      const snapshot = await state.rpc.request("session.load_page", { session_id: sessionId, offset: 0, limit: 60 }).promise;
+      if (state.agentSessionId !== sessionId) return;
+      state.agentSnapshot = snapshot;
+      renderAgentTranscript();
+      updateAgentSessionUi();
+    } catch (error) {
+      toast(`读取 Agent Session 失败：${error.message}`);
+    }
+  }
+
+  async function inspectSession(sessionId, rerender = true) {
+    state.inspectedSessionId = sessionId;
+    if (rerender) renderSessions();
+    $("#session-title").textContent = shortId(sessionId, 34);
+    $("#session-meta").textContent = "正在读取 Session 快照与执行链路…";
+    $("#continue-session").disabled = true;
+    state.inspectedMessageOffset = 0;
+    state.inspectedMessageTotal = 0;
+    state.inspectedMessageHasMore = false;
+    state.inspectedTraceOffset = 0;
+    state.inspectedTraceTotal = 0;
+    state.inspectedTraceHasMore = false;
+    updateSessionPagers();
+    try {
+      const snapshotCall = state.rpc.request("session.load_page", { session_id: sessionId, offset: 0, limit: 60 }).promise;
+      const traceCall = state.rpc.request("session.trace_page", { session_id: sessionId, offset: 0, limit: 60 }).promise;
+      const [snapshotResult, traceResult] = await Promise.allSettled([snapshotCall, traceCall]);
+      if (snapshotResult.status === "rejected") throw snapshotResult.reason;
+      const snapshot = snapshotResult.value;
+      const trace = traceResult.status === "fulfilled" ? traceResult.value : { records: [], total_records: 0 };
+      if (traceResult.status === "rejected") toast(`链路读取失败：${traceResult.reason?.message || "未知错误"}`);
+      if (state.inspectedSessionId !== sessionId) return;
+      state.inspectedSnapshot = snapshot;
       state.traces = trace.records || [];
-      renderTranscript();
+      state.inspectedMessageOffset = (snapshot.offset || 0) + state.inspectedSnapshot.messages.length;
+      state.inspectedMessageTotal = snapshot.total_messages ?? state.inspectedSnapshot.messages.length;
+      state.inspectedMessageHasMore = Boolean(snapshot.has_more);
+      state.inspectedTraceOffset = (trace.offset || 0) + state.traces.length;
+      state.inspectedTraceTotal = trace.total_records ?? state.traces.length;
+      state.inspectedTraceHasMore = Boolean(trace.has_more);
+      renderTranscript($("#session-transcript"), snapshot.messages || [], false);
       renderTrace();
       const status = snapshot.status || "idle";
-      $("#conversation-meta").textContent = `${statusLabel(status)} · ${snapshot.messages.length} 条消息 · ${state.traces.length} 条链路记录`;
+      $("#session-meta").textContent = `${statusLabel(status)} · ${formatLoadedCount(state.inspectedMessageOffset, state.inspectedMessageTotal, "消息")} · ${formatLoadedCount(state.inspectedTraceOffset, state.inspectedTraceTotal, "链路记录")}`;
+      $("#continue-session").disabled = false;
+      updateSessionPagers();
     } catch (error) {
+      $("#message-pager").classList.add("hidden");
+      $("#trace-pager").classList.add("hidden");
       toast(`读取 Session 失败：${error.message}`);
     }
   }
 
-  function renderTranscript() {
-    const messages = state.snapshot?.messages || [];
+  async function loadMoreMessages() {
+    const sessionId = state.inspectedSessionId;
+    if (!sessionId || !state.inspectedMessageHasMore) return;
+    const button = $("#load-more-messages");
+    button.disabled = true;
+    try {
+      const page = await state.rpc.request("session.load_page", {
+        session_id: sessionId,
+        offset: state.inspectedMessageOffset,
+        limit: 60,
+      }).promise;
+      if (state.inspectedSessionId !== sessionId) return;
+      state.inspectedSnapshot ||= { messages: [] };
+      state.inspectedSnapshot.messages ||= [];
+      state.inspectedSnapshot.messages.push(...(page.messages || []));
+      state.inspectedMessageOffset = (page.offset || state.inspectedMessageOffset) + (page.messages || []).length;
+      state.inspectedMessageTotal = page.total_messages ?? state.inspectedMessageTotal;
+      state.inspectedMessageHasMore = Boolean(page.has_more);
+      renderTranscript($("#session-transcript"), state.inspectedSnapshot.messages, false);
+      updateSessionPagers();
+      updateSessionMeta();
+    } catch (error) {
+      toast(`加载更多消息失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function loadMoreTraces() {
+    const sessionId = state.inspectedSessionId;
+    if (!sessionId || !state.inspectedTraceHasMore) return;
+    const button = $("#load-more-traces");
+    button.disabled = true;
+    try {
+      const page = await state.rpc.request("session.trace_page", {
+        session_id: sessionId,
+        offset: state.inspectedTraceOffset,
+        limit: 60,
+      }).promise;
+      if (state.inspectedSessionId !== sessionId) return;
+      state.traces.push(...(page.records || []));
+      state.inspectedTraceOffset = (page.offset || state.inspectedTraceOffset) + (page.records || []).length;
+      state.inspectedTraceTotal = page.total_records ?? state.inspectedTraceTotal;
+      state.inspectedTraceHasMore = Boolean(page.has_more);
+      renderTrace();
+      updateSessionPagers();
+      updateSessionMeta();
+    } catch (error) {
+      toast(`加载更多链路失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function formatLoadedCount(loaded, total, label) {
+    return total > loaded ? `已加载 ${loaded}/${total} 条${label}` : `${total} 条${label}`;
+  }
+
+  function updateSessionMeta() {
+    if (!state.inspectedSnapshot) return;
+    const status = state.inspectedSnapshot.status || "idle";
+    $("#session-meta").textContent = `${statusLabel(status)} · ${formatLoadedCount(state.inspectedMessageOffset, state.inspectedMessageTotal, "消息")} · ${formatLoadedCount(state.inspectedTraceOffset, state.inspectedTraceTotal, "链路记录")}`;
+  }
+
+  function updateSessionPagers() {
+    const messagePager = $("#message-pager");
+    const tracePager = $("#trace-pager");
+    messagePager.classList.toggle("hidden", !state.inspectedMessageHasMore && !state.inspectedMessageTotal);
+    tracePager.classList.toggle("hidden", !state.inspectedTraceHasMore && !state.inspectedTraceTotal);
+    $("#message-progress").textContent = state.inspectedMessageTotal
+      ? formatLoadedCount(state.inspectedMessageOffset, state.inspectedMessageTotal, "消息")
+      : "暂无消息";
+    $("#trace-progress").textContent = state.inspectedTraceTotal
+      ? formatLoadedCount(state.inspectedTraceOffset, state.inspectedTraceTotal, "链路")
+      : "暂无链路";
+    $("#load-more-messages").classList.toggle("hidden", !state.inspectedMessageHasMore);
+    $("#load-more-traces").classList.toggle("hidden", !state.inspectedTraceHasMore);
+  }
+
+  function renderAgentTranscript() {
+    renderTranscript($("#agent-transcript"), state.agentSnapshot?.messages || [], true);
+  }
+
+  function renderTranscript(node, messages, agentMode) {
     const html = messages.map(renderMessage).join("");
-    $("#transcript").innerHTML = html || `
+    node.innerHTML = html || (agentMode ? agentEmptyTemplate() : `
       <div class="empty-state">
-        <span class="empty-orbit">✦</span>
-        <h3>这是一个新的 Session</h3>
-        <p>从下方发出第一条任务。Web、TUI 和 CLI 的记录都会进入同一套本地存储。</p>
-      </div>`;
-    scrollTranscript();
+        <span class="empty-orbit">⌁</span>
+        <h2>空白 Session</h2>
+        <p>这个 Session 暂时没有消息。</p>
+      </div>`);
+    if (agentMode) bindStarterButtons();
+    requestAnimationFrame(() => { node.scrollTop = node.scrollHeight; });
+  }
+
+  function agentEmptyTemplate() {
+    return `<div class="empty-state agent-empty">
+      <span class="empty-orbit">✦</span>
+      <h2>让 Agent 真正在项目里工作</h2>
+      <p>当前任务将绑定到 <strong>${escapeHtml(state.workspace || "所选工作目录")}</strong>。你可以直接描述目标，Agent 会读取代码、执行工具并完成验证。</p>
+      <div class="starter-grid">
+        <button type="button" data-starter="分析这个项目的结构，并告诉我最值得优先改进的三个地方。">分析项目结构</button>
+        <button type="button" data-starter="运行项目测试，定位失败原因并修复。">运行并修复测试</button>
+        <button type="button" data-starter="阅读当前项目，帮我实现一个合理的小功能并完成验证。">开始开发功能</button>
+      </div>
+    </div>`;
   }
 
   function renderMessage(message) {
@@ -187,47 +437,107 @@
     </article>`;
   }
 
-  async function newSession() {
+  async function newAgentSession() {
+    if (!state.connected || state.activeRequest) return;
     try {
-      const { promise } = state.rpc.request("session.new");
-      const snapshot = await promise;
-      state.selectedId = snapshot.session_id;
-      await refreshSessions(snapshot.session_id);
+      const snapshot = await state.rpc.request("session.new").promise;
+      state.agentSessionId = snapshot.session_id;
+      state.agentSnapshot = snapshot;
+      state.activities = [];
+      renderAgentTranscript();
+      renderActivities();
+      updateAgentSessionUi();
+      await refreshSessionListOnly();
+      switchView("agent");
       $("#prompt").focus();
-    } catch (error) { toast(`新建会话失败：${error.message}`); }
+    } catch (error) {
+      toast(`新建任务失败：${error.message}`);
+    }
+  }
+
+  async function ensureAgentSession() {
+    if (state.agentSessionId) return state.agentSessionId;
+    const snapshot = await state.rpc.request("session.new").promise;
+    state.agentSessionId = snapshot.session_id;
+    state.agentSnapshot = snapshot;
+    updateAgentSessionUi();
+    return snapshot.session_id;
+  }
+
+  async function refreshSessionListOnly() {
+    const result = await state.rpc.request("session.list").promise;
+    state.sessions = result.sessions || [];
+    renderSessions();
+  }
+
+  function resetAgentSession() {
+    state.agentSessionId = null;
+    state.agentSnapshot = null;
+    state.activities = [];
+    renderAgentTranscript();
+    renderActivities();
+    updateAgentSessionUi();
+  }
+
+  function updateAgentSessionUi() {
+    const id = state.agentSessionId;
+    $("#agent-session-id").textContent = id ? shortId(id, 30) : "发送任务时自动创建";
+    $("#agent-meta").textContent = id
+      ? `当前任务 ${shortId(id, 26)} · 工作区 ${directoryName(state.workspace)}`
+      : `准备在 ${directoryName(state.workspace) || "所选目录"} 开始新的开发任务`;
+    $("#inspect-current").disabled = !id;
+    setAgentControls();
   }
 
   async function sendPrompt(event) {
     event.preventDefault();
     const prompt = $("#prompt").value.trim();
-    if (!prompt || !state.selectedId || state.activeRequest) return;
-    $("#prompt").value = "";
-    state.snapshot ||= { messages: [] };
-    state.snapshot.messages.push({ role: "user", content: prompt });
-    state.draftAssistant = { role: "assistant", content: "" };
-    state.snapshot.messages.push(state.draftAssistant);
-    renderTranscript();
-    $("#send").disabled = true;
-    $("#cancel-turn").classList.remove("hidden");
-    $("#conversation-meta").textContent = "模型正在思考…";
-    const call = state.rpc.request(
-      "chat.send",
-      { message: prompt, session_id: state.selectedId },
-      handleAgentEvent,
-    );
-    state.activeRequest = call.id;
+    if (!prompt || !state.connected || state.activeRequest) return;
+    let completed = false;
     try {
+      const sessionId = await ensureAgentSession();
+      $("#prompt").value = "";
+      state.agentSnapshot ||= { messages: [] };
+      state.agentSnapshot.messages ||= [];
+      state.agentSnapshot.messages.push({ role: "user", content: prompt });
+      state.draftAssistant = { role: "assistant", content: "" };
+      state.agentSnapshot.messages.push(state.draftAssistant);
+      state.activities = [];
+      addActivity("turn", "任务已提交", "Agent 正在理解目标并规划下一步");
+      renderAgentTranscript();
+      setAgentStatus("running", "工作中");
+      $("#cancel-turn").classList.remove("hidden");
+      const call = state.rpc.request(
+        "chat.send",
+        { message: prompt, session_id: sessionId },
+        handleAgentEvent,
+      );
+      state.activeRequest = call.id;
+      setAgentControls();
       await call.promise;
-      toast("任务完成");
+      completed = true;
+      addActivity("turn", "任务完成", "结果已写入当前 Session");
+      setAgentStatus("idle", "已完成");
+      toast("Agent 任务完成");
     } catch (error) {
-      state.snapshot.messages.push({ role: "system", content: `任务失败：${error.message}` });
+      state.agentSnapshot ||= { messages: [] };
+      state.agentSnapshot.messages ||= [];
+      if (state.draftAssistant && !state.draftAssistant.content) {
+        const draftIndex = state.agentSnapshot.messages.indexOf(state.draftAssistant);
+        if (draftIndex >= 0) state.agentSnapshot.messages.splice(draftIndex, 1);
+      }
+      state.agentSnapshot.messages.push({ role: "system", content: `任务失败：${error.message}` });
+      addActivity("error", "任务失败", error.message);
+      setAgentStatus("error", "失败");
+      renderAgentTranscript();
       toast(`任务失败：${error.message}`);
     } finally {
       state.activeRequest = null;
       state.draftAssistant = null;
       $("#cancel-turn").classList.add("hidden");
-      $("#send").disabled = false;
-      await refreshSessions(state.selectedId);
+      setAgentControls();
+      await refreshSessionListOnly().catch(() => {});
+      if (completed && state.agentSessionId) await loadAgentSession(state.agentSessionId);
     }
   }
 
@@ -237,16 +547,36 @@
     if (event === "text_delta") {
       state.draftAssistant ||= { role: "assistant", content: "" };
       state.draftAssistant.content += data.delta || "";
-      renderTranscript();
-      $("#conversation-meta").textContent = "正在接收模型响应…";
+      renderAgentTranscript();
+      setAgentStatus("running", "生成响应");
     } else if (event === "tool_started") {
-      $("#conversation-meta").textContent = `第 ${data.round || "?"} 轮 · 正在执行 ${data.name || "工具"}`;
+      addActivity("tool", `执行 ${data.name || "工具"}`, `第 ${data.round || "?"} 轮 · 正在运行`);
+      setAgentStatus("running", "执行工具");
     } else if (event === "tool_finished") {
-      $("#conversation-meta").textContent = `${data.name || "工具"} ${data.success === false ? "失败" : "完成"} · ${data.duration_ms || 0}ms`;
+      addActivity(data.success === false ? "error" : "tool", `${data.name || "工具"}${data.success === false ? "失败" : "完成"}`, `${data.duration_ms || 0}ms`);
     } else if (event === "approval_required") {
       renderApproval(data.approval);
-      $("#conversation-meta").textContent = "等待你的审批";
+      addActivity("approval", "等待审批", data.approval?.prompt || "Agent 请求执行受保护操作");
+      setAgentStatus("waiting", "待审批");
     }
+  }
+
+  function addActivity(kind, title, detail) {
+    state.activities.unshift({ kind, title, detail });
+    state.activities = state.activities.slice(0, 30);
+    renderActivities();
+  }
+
+  function renderActivities() {
+    $("#activity-list").innerHTML = state.activities.length
+      ? state.activities.map((item) => `<div class="activity-item ${escapeAttr(item.kind)}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join("")
+      : `<div class="activity-empty">发出任务后，这里会显示模型思考、工具执行和审批状态。</div>`;
+  }
+
+  function setAgentStatus(mode, label) {
+    const node = $("#agent-status");
+    node.className = `status-pill ${mode}`;
+    node.textContent = label;
   }
 
   function renderApproval(approval) {
@@ -254,19 +584,22 @@
     const card = document.createElement("div");
     card.className = "approval-card";
     card.innerHTML = `<strong>需要审批</strong><p>${escapeHtml(approval.prompt || "Agent 请求执行受保护操作")}</p>
-      <div class="approval-actions"><button class="approve">允许</button><button class="deny">拒绝</button></div>`;
+      <div class="approval-actions"><button class="approve" type="button">允许</button><button class="deny" type="button">拒绝</button></div>`;
     card.querySelector(".approve").addEventListener("click", () => respondApproval(approval.id, true, card));
     card.querySelector(".deny").addEventListener("click", () => respondApproval(approval.id, false, card));
-    $("#transcript").appendChild(card);
-    scrollTranscript();
+    $("#agent-transcript").appendChild(card);
+    $("#agent-transcript").scrollTop = $("#agent-transcript").scrollHeight;
   }
 
   async function respondApproval(id, approved, card) {
     try {
       await state.rpc.request("approval.respond", { approval_id: id, approved }).promise;
       card.remove();
-      toast(approved ? "已允许，Agent 继续执行" : "已拒绝，Agent 继续执行");
-    } catch (error) { toast(`审批失败：${error.message}`); }
+      addActivity("approval", approved ? "已允许操作" : "已拒绝操作", "Agent 将继续处理当前任务");
+      setAgentStatus("running", "继续工作");
+    } catch (error) {
+      toast(`审批失败：${error.message}`);
+    }
   }
 
   async function cancelTurn() {
@@ -274,16 +607,48 @@
     try {
       await state.rpc.request("agent.cancel", {
         request_id: state.activeRequest,
-        session_id: state.selectedId,
+        session_id: state.agentSessionId,
       }).promise;
+      addActivity("error", "已请求停止", "等待 Agent 结束当前步骤");
       toast("已发送停止请求");
-    } catch (error) { toast(`停止失败：${error.message}`); }
+    } catch (error) {
+      toast(`停止失败：${error.message}`);
+    }
+  }
+
+  function continueInspectedSession() {
+    if (!state.inspectedSessionId || !state.inspectedSnapshot) return;
+    state.agentSessionId = state.inspectedSessionId;
+    state.agentSnapshot = JSON.parse(JSON.stringify(state.inspectedSnapshot));
+    state.activities = [];
+    renderAgentTranscript();
+    renderActivities();
+    updateAgentSessionUi();
+    switchView("agent");
+    $("#prompt").focus();
+  }
+
+  function inspectCurrentAgentSession() {
+    if (!state.agentSessionId) return;
+    state.inspectedSessionId = state.agentSessionId;
+    switchView("sessions");
+  }
+
+  function switchView(view) {
+    state.activeView = view;
+    $$("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+    $$(".view").forEach((panel) => panel.classList.toggle("is-active", panel.id === `${view}-view`));
+    if (view === "sessions") {
+      renderSessions();
+      const next = state.inspectedSessionId || state.sessions[0]?.id;
+      if (next) inspectSession(next).catch((error) => toast(error.message));
+    }
   }
 
   function renderTrace() {
     const records = state.traces || [];
     const visible = records.filter((record) => state.traceFilter === "all" || traceGroup(record.kind) === state.traceFilter);
-    $("#trace-count").textContent = records.length;
+    $("#trace-count").textContent = state.inspectedTraceTotal || records.length;
     $("#trace-list").innerHTML = visible.length
       ? visible.map(renderTraceItem).join("")
       : `<div class="trace-empty">${records.length ? "当前筛选条件下没有记录。" : "这个 Session 尚无结构化链路。旧 Session 的消息仍会正常显示。"}</div>`;
@@ -326,6 +691,109 @@
     return "turn";
   }
 
+  async function openWorkspacePicker() {
+    if (state.activeRequest) {
+      toast("Agent 正在工作，结束或停止当前任务后再切换目录。");
+      return;
+    }
+    $("#workspace-dialog").showModal();
+    await browseDirectory(state.workspace || state.defaultWorkspace).catch((error) => {
+      $("#directory-list").innerHTML = `<div class="directory-empty">${escapeHtml(error.message)}</div>`;
+    });
+  }
+
+  async function browseDirectory(path) {
+    $("#directory-list").innerHTML = `<div class="directory-empty">正在读取目录…</div>`;
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const listing = await fetchJson(`/api/directories${query}`);
+    state.browsePath = listing.path;
+    state.browseParent = listing.parent || null;
+    $("#browse-path").value = listing.path;
+    $("#browse-current").textContent = listing.path;
+    $("#browse-parent").disabled = !listing.parent;
+    renderWorkspaceFavorites(listing.favorites || []);
+    $("#directory-list").innerHTML = listing.directories?.length
+      ? listing.directories.map((directory) => `<button class="directory-item" type="button" data-directory="${escapeAttr(directory.path)}"><span>▱</span><strong>${escapeHtml(directory.name)}</strong></button>`).join("")
+      : `<div class="directory-empty">这个目录没有子文件夹。</div>`;
+    $$('[data-directory]').forEach((button) => button.addEventListener("click", () => browseDirectory(button.dataset.directory).catch((error) => toast(error.message))));
+  }
+
+  function renderWorkspaceFavorites(serverFavorites) {
+    const recents = recentWorkspaces();
+    const favorites = [...new Set([...serverFavorites, ...recents])].filter(Boolean).slice(0, 10);
+    $("#workspace-favorites").innerHTML = favorites.map((path) => `<button type="button" data-favorite="${escapeAttr(path)}" title="${escapeAttr(path)}">${escapeHtml(directoryName(path) || path)}</button>`).join("");
+    $$('[data-favorite]').forEach((button) => button.addEventListener("click", () => browseDirectory(button.dataset.favorite).catch((error) => toast(error.message))));
+  }
+
+  async function selectBrowsedWorkspace() {
+    if (!state.browsePath || state.browsePath === state.workspace) {
+      $("#workspace-dialog").close();
+      return;
+    }
+    $("#workspace-dialog").close();
+    resetWorkspaceState();
+    await connect(state.browsePath);
+    switchView("agent");
+  }
+
+  function resetWorkspaceState() {
+    state.sessions = [];
+    state.agentSessionId = null;
+    state.inspectedSessionId = null;
+    state.agentSnapshot = null;
+    state.inspectedSnapshot = null;
+    state.traces = [];
+    state.inspectedMessageOffset = 0;
+    state.inspectedMessageTotal = 0;
+    state.inspectedMessageHasMore = false;
+    state.inspectedTraceOffset = 0;
+    state.inspectedTraceTotal = 0;
+    state.inspectedTraceHasMore = false;
+    state.activities = [];
+    renderSessions();
+    renderAgentTranscript();
+    renderActivities();
+    renderTrace();
+    updateAgentSessionUi();
+  }
+
+  async function fetchJson(path) {
+    const response = await fetch(path, { headers: authorizationHeaders() });
+    const value = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(value.error?.message || `请求失败：${response.status}`);
+    return value;
+  }
+
+  function authorizationHeaders() {
+    const token = apiToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  function apiToken() { return localStorage.getItem("my-agent-token") || ""; }
+  function recentWorkspaces() {
+    try { return JSON.parse(localStorage.getItem("my-agent-workspaces") || "[]"); }
+    catch { return []; }
+  }
+  function rememberWorkspace(path) {
+    if (!path) return;
+    localStorage.setItem("my-agent-workspace", path);
+    const recents = [path, ...recentWorkspaces().filter((item) => item !== path)].slice(0, 8);
+    localStorage.setItem("my-agent-workspaces", JSON.stringify(recents));
+  }
+  function updateWorkspaceUrl(path) {
+    const url = new URL(location.href);
+    if (path) url.searchParams.set("workspace", path);
+    history.replaceState(null, "", url);
+  }
+  function directoryName(path = "") {
+    return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+  }
+  function bindStarterButtons() {
+    $$('[data-starter]').forEach((button) => button.addEventListener("click", () => {
+      $("#prompt").value = button.dataset.starter;
+      $("#prompt").focus();
+    }));
+  }
   function shortId(value = "", max = 22) {
     if (value.length <= max) return value;
     const keep = Math.max(5, Math.floor((max - 1) / 2));
@@ -352,20 +820,41 @@
   function escapeHtml(value = "") { return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]); }
   function escapeAttr(value = "") { return escapeHtml(value); }
   function statusLabel(status) { return ({ idle: "空闲", running: "运行中", waiting: "等待审批" })[status] || status; }
-  function scrollTranscript() { requestAnimationFrame(() => { const node = $("#transcript"); node.scrollTop = node.scrollHeight; }); }
   let toastTimer;
-  function toast(message) { const node = $("#toast"); node.textContent = message; node.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => node.classList.remove("show"), 3200); }
+  function toast(message) {
+    const node = $("#toast");
+    node.textContent = message;
+    node.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => node.classList.remove("show"), 3400);
+  }
 
   $("#composer").addEventListener("submit", sendPrompt);
   $("#prompt").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") sendPrompt(event);
   });
-  $("#new-session").addEventListener("click", newSession);
+  $("#new-agent-session").addEventListener("click", newAgentSession);
   $("#cancel-turn").addEventListener("click", cancelTurn);
+  $("#inspect-current").addEventListener("click", inspectCurrentAgentSession);
+  $("#continue-session").addEventListener("click", continueInspectedSession);
+  $("#load-more-messages").addEventListener("click", loadMoreMessages);
+  $("#load-more-traces").addEventListener("click", loadMoreTraces);
   $("#refresh").addEventListener("click", () => refreshSessions().catch((error) => toast(error.message)));
   $("#session-search").addEventListener("input", renderSessions);
+  $$("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  $("#workspace-trigger").addEventListener("click", openWorkspacePicker);
+  $("#change-workspace").addEventListener("click", openWorkspacePicker);
+  $("#browse-go").addEventListener("click", () => browseDirectory($("#browse-path").value.trim()).catch((error) => toast(error.message)));
+  $("#browse-path").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      browseDirectory(event.currentTarget.value.trim()).catch((error) => toast(error.message));
+    }
+  });
+  $("#browse-parent").addEventListener("click", () => state.browseParent && browseDirectory(state.browseParent).catch((error) => toast(error.message)));
+  $("#select-workspace").addEventListener("click", selectBrowsedWorkspace);
   $("#settings").addEventListener("click", () => {
-    $("#token").value = localStorage.getItem("my-agent-token") || "";
+    $("#token").value = apiToken();
     $("#settings-dialog").showModal();
   });
   $("#reconnect").addEventListener("click", () => {
@@ -379,5 +868,6 @@
     renderTrace();
   }));
 
-  connect();
+  bindStarterButtons();
+  bootstrap();
 })();

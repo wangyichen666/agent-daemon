@@ -204,3 +204,39 @@
 - 发布门禁阶段：`cargo test --all-targets` 131/131、严格 Clippy、fmt、git diff check、Node JS 语法检查和 `cargo build --release` 全部通过；待执行 `cargo install` 与最终工作树审计。
 - 发布门禁最终复核完成：`cargo install --path . --force` 已执行，`my-agent --version` 为 0.1.0，release 与 PATH 二进制逐字节一致；隔离 Web/TUI 生命周期验收通过，临时工作区已移入可恢复废纸篓且无残留进程。
 - Web 控制台阶段 0～4 全部完成；本轮修改保留在当前工作树，未执行提交或推送。
+
+# 2026-09-13 Web Agent 工作台与工作目录
+
+- 已收到需求：前端拆为 Session 查看与 Agent 对话，Agent 对话可选择工作目录，并将 Agent 实际开发工作提升为页面重点。
+- 已读取 planning-with-files 技能并建立阶段 0～4 计划。
+- 当前进入阶段 0：审计单工作区 daemon、安全策略、Session 隔离和 Web RPC 路由，确定跨工作区实现边界。
+- 已确定后端方案：一个浏览器 WebSocket 只绑定一个所选工作区；Web 服务缓存每个工作区的 daemon client，目录切换通过安全重连完成，不向现有 `chat.send` 注入可变 cwd。
+- 阶段 0 完成，进入阶段 1：实现 Web 工作区路由器、鉴权目录浏览 API、WebSocket workspace 握手和 `/web` 跨工作区复用 URL。
+- 已核对 serve 测试和鉴权辅助函数；将保留默认 client 的内存注入能力，并为目录 API、workspace 握手与 launcher URL 增加独立回归。
+- 阶段 1 完成：WebSocket workspace 握手、按目录 daemon 路由、鉴权目录浏览、同源 Origin 校验与 `/web?workspace=...` 复用均已实现。
+- Agent 工作台与 Session 查看已拆成两个一级页面；Agent 页面包含目录选择、新任务、流式对话、审批/取消、实时工具动态和跳转链路入口。JS 语法检查、serve 7 项和 launcher 2 项测试通过。
+- 浏览器首屏烟雾通过：默认进入 Agent 工作台、工作目录显示为 canonical project-a、对话输入和 Agent 动态均可用；继续验证目录切换与 Session 独立页。
+- 目录浏览器验收通过：打开选择器、读取当前目录、返回父目录并列出两个隔离测试项目；下一步切换到 project-b 并验证独立 daemon/Session。
+- project-b 切换验收通过：单一 Web 服务按需启动第二个工作区 daemon，两个 daemon 的 PID、runtime ready 和工作区日志相互独立。
+- Agent 失败路径与 Session 独立页验收通过：请求绑定 project-b，Agent 动态显示失败，Session 页面完整呈现对话与 4 条结构化链路；正在修正失败消息被刷新覆盖的细节。
+- Session → Agent 继续工作入口与输入聚焦验收通过；浏览器控制台无警告或错误。失败消息保留与失败状态配色已修正。
+- README/HTML 文档已同步；`git diff --check`、rustfmt check 与 `node --check web/app.js` 通过，进入严格 Clippy 与全量测试。
+- 严格 Clippy 通过；全量 `cargo test --all-targets` 133/133 通过（新增目录列表与 WebSocket Origin 回归）。
+- 最新嵌入资源浏览器回归确认失败提示修复生效且控制台干净；正在清除首增量前失败留下的空 assistant 占位。
+- 空 assistant 占位已修正；隔离 Web 服务和两个 daemon 已停止，临时工作区移入 `/Users/pilot/.Trash/my-agent-workspace-ui-lTVt11`，可恢复且无残留进程。
+- 最终门禁完成：`git diff --check`、rustfmt、JS 语法、严格 Clippy、release 构建全部通过；全量测试 133/133 通过。
+- 已执行 `cargo install --path . --force` 并同步 PATH 优先位置；安装版 `my-agent --version` 为 0.1.0，阶段 0～4 全部完成。
+- 日期分组浏览器回归创建了多个空 Session，确认空 Session 需要按“今天”显示；已加入当天回退与日期降序排序，继续验证折叠交互。
+- 日期分组首轮交互已验证：创建 3 个空 Session 后页面显示“今天 3 个 Session”，折叠后只保留日期行，展开按钮可继续恢复内容。
+
+# 2026-09-13 Session 日志帧超限修复
+
+- [x] 已复现/确认：`session.load` 或 `session.trace` 的整包 JSON-RPC 响应可达 7.6 MB，超过 4 MiB 协议帧上限，前端 `Promise.all` 因此无法显示任何详情。
+- [x] 新增有字节预算的消息/trace 分页 RPC，并保持旧 RPC 兼容。
+- [x] Web Session 页改为首屏分页、增量加载和超大字段可见截断。
+- [x] 增加大 Session 回归测试，完成全量测试、格式、Clippy、JS 检查与浏览器验收。
+
+- [x] daemon 新增 `session.load_page` / `session.trace_page`，响应限制在协议帧上限以下，并对超大字符串做递归截断。
+- [x] Web Session 查看页改为分页首屏、分别加载更多消息/链路；链路读取失败时消息仍可显示。
+- [x] 增加 300 KiB 多消息页预算测试与 RPC 分页回归；全量测试 134/134、Clippy、rustfmt、JS 语法和 diff 检查通过。
+- [x] 通过本地 Web 服务验证 Agent 工作台、Session 查看页、空 Session 日期分组和浏览器控制台无错误；release 构建并重新安装到 PATH。

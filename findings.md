@@ -411,3 +411,43 @@
 - 浏览器可访问性树确认链路记录含精确毫秒时间、provider、完整消息数/工具数、首字延迟入口与可展开 payload；浏览器控制台无 error/warning。
 - 840px 视口下采用双栏对话 + 下方链路面板，完整页面可滚动；大屏使用三栏。移动端不再隐藏 Session，而是纵向排列，功能仍可达。
 - 隔离 TUI 实测页眉显示 `Web http://127.0.0.1:18787 · /web 打开`；输入 `/web` 返回“已在运行，已打开”，进程检查确认仍只有一个 serve 实例。
+
+# 2026-09-13 Web Agent 工作台与工作目录
+
+- 当前架构是“一工作区一个 daemon”：RuntimePaths、SessionStore、SafetyPolicy、MCP、Memory、Plan、Cron 都在 daemon 启动时绑定 `--workspace`。
+- 当前 Web 服务只持有一个 `DaemonClient` 和一个固定 workspace；因此仅在现有 `chat.send` 参数里增加 cwd 会绕过/破坏安全边界，不能满足真实的跨目录开发。
+- 正确方向是保留 daemon 的单工作区隔离，让 Web 层针对所选 canonical 工作目录连接或启动对应 daemon，再把 RPC 路由到该工作区客户端。
+- 当前页面虽能聊天，但三栏布局以 Session/trace 为视觉中心；需要改成“Agent 工作台 / Session 查看”两个一级视图，并把 Agent 工作台设为默认入口。
+- WebSocket 当前在握手后永久绑定 `ApiState.client`；最小安全改造是让 connect 帧携带 canonical workspace，由 Web 服务的工作区路由器为该目录复用或启动对应 daemon，随后整条 socket 只绑定这一工作区。
+- 浏览器原生目录选择器不会把绝对路径交给服务端，无法直接用于本地 Agent cwd；需要由同源、鉴权后的本地 API 提供只读目录浏览，并在服务端再次 canonicalize 与目录类型校验。
+- Web 服务应从“单 daemon 附属进程”升级为多工作区入口：默认工作区继续服务 OpenAI 兼容 API，而 WebSocket 可按连接选择工作区；页面切换目录时重连，天然避免请求跨工作区串线。
+- RuntimePaths 已用 canonical workspace 哈希隔离 socket/PID/ready/log，现有 `ensure_daemon` 可直接被 Web 工作区路由器复用；无需把 daemon 本体改为多租户。
+- `/web` launcher 当前把 8787 上的健康服务限定为同一工作区，且 URL 不携带目录；需改为复用任意健康的 my-agent Web 服务，并用 `?workspace=<绝对路径>` 告知页面本次希望打开的工作区。
+- 页面当前只有一个三栏视图。重构时保留既有 transcript、审批和 trace 渲染逻辑，但分别挂到默认的 Agent 工作台与独立 Session 页面，减少回归面。
+- 现有 WebSocket 集成测试使用内存 DaemonClient；工作区路由器需要保留注入默认 client 的构造路径，使旧审批/断线恢复测试无需启动真实 daemon。
+- `/health` 没有既有状态断言，可调整为 Web 服务自身健康状态；目录浏览复用已有 Bearer 鉴权，WebSocket 另外校验同源 Origin，避免本地页面被跨站 WebSocket 滥用。
+- 首次真实浏览器加载确认默认页是“Agent 工作台”而非日志页；顶部显示 project-a 工作目录，正文突出 Agent 开发任务，右侧仅保留实时执行动态，并提供独立“Session 查看”入口。
+- WebSocket 返回的 canonical 路径为 `/private/tmp/.../project-a`，页面 URL 与工作目录展示同步更新，说明 query workspace → 服务端 canonicalize → connected workspace 的链路生效。
+- 目录选择器真实读取 project-a 后只显示其 `.my-agent` 子目录；点击“上一级”后准确显示同级 project-a、project-b 与 runtime，证明浏览器拿到的是服务端目录结构而非伪造的前端列表。
+- 选择器同时提供默认工作区、用户目录和最近目录快捷项；路径输入、上一级与“选择当前目录”形成完整的绝对目录选择流程。
+- 浏览器从 project-a 切换到 project-b 后，页眉、Agent 说明、composer 上下文和 URL 同步切换为 canonical project-b，连接状态恢复为“Agent 已连接”。
+- 进程与运行文件核对显示 project-a/project-b 分别拥有独立 daemon PID、ready marker 和 `.my-agent/daemon.log`；Web 服务仍只有一个，验证了“一个 Web 入口、多工作区 daemon、安全隔离”的目标结构。
+- project-b 的 Agent 请求真实到达该工作区 daemon；不可达 Ollama 触发失败后，右侧“Agent 动态”展示任务提交与明确失败原因，工作目录始终保持 project-b。
+- 独立 Session 查看页显示 project-b 仅有自身 1 个 Session、1 条消息和 4 条 trace（Turn start、LM request、LM response failed、Turn failed），与 project-a 数据隔离。
+- 浏览器验收发现失败系统消息会先加入对话，随后被 finally 中的磁盘快照刷新覆盖；右侧仍有失败记录，但应避免对话内错误提示瞬间消失，并为失败状态补红色视觉语义。
+- “在 Agent 工作台继续”可从只读 Session 页带回同一 Session，并自动聚焦任务输入；浏览器控制台无 error/warning。
+- 已修正失败后无条件重载快照的问题：成功时同步持久化快照，失败时保留对话内系统错误，同时给 Agent 状态使用红色失败语义。
+- README 与系统说明已改为“Agent 工作台默认首页 + Session 独立查看 + 每目录独立 daemon”的真实模型；WebSocket 示例同步加入 workspace 字段。
+- 当前差异只覆盖 Web 工作台、serve/workspace launcher、文档和规划记录；静态差异检查、rustfmt 与 JS 语法检查通过。
+- 最新二进制回归确认失败系统消息会持续保留在 Agent 对话中，右侧失败状态与动态同步，浏览器控制台仍无 error/warning。
+- 同一回归暴露一个空 assistant 占位：模型在首个增量前失败时草稿节点没有内容但仍被渲染为 Agent 标签；应在失败分支移除空草稿，若已有部分增量则保留。
+- 空 assistant 草稿已按对象身份在失败分支移除；已有部分流式内容时不会删除，可保留模型中途失败前的有效输出。
+- 浏览器创建三个空 Session 后发现它们的 `updated_at` 为 null；这类刚创建的 Session 应归入“今天”，否则用户无法折叠/展开今天分组。
+- 日期分组按 ISO 日键降序排列；无时间戳的新 Session 回退到当天，真正无法解析的历史值仍归入“日期未知”。
+- 最新嵌入资源的浏览器回归确认三个新建空 Session 均归入“今天”，今天分组默认展开并正确显示数量；点击日期标题后 Session 条目全部隐藏，日期标题保留。
+
+# 2026-09-13 Session 日志帧超限修复
+
+- 用户反馈 Web 页面无法查看 Session 日志和链路；截图错误为“协议帧大小 7643140 字节，超过 4194304 字节限制”。
+- 根因确认：前端 `inspectSession` 并行调用 `session.load` 与 `session.trace`，后端 handler 分别把完整消息数组/完整 trace 数组序列化为单个 JSON-RPC 响应；daemon 协议层 `MAX_FRAME_BYTES` 固定为 4 MiB，因此任一大响应都会让 `Promise.all` 失败并阻断整页。
+- `SessionStore::load`/`load_trace` 当前会完整读入内存；新增分页 RPC 时应先限制响应帧，再视需要优化文件读取，不能通过提高全局帧上限掩盖问题。

@@ -53,7 +53,7 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 - 输入 `/` 实时显示内置命令及简介；继续输入可按前缀过滤，`↑/↓` 选择、`Tab` 补全。
 - 模型等待、流式输出、工具执行期间持续显示不确定进度动画。
 - 审批、完成、失败、取消和连接中断都有明确终态；滚离底部时提示新消息。
-- 页眉持续显示本地 Web 地址；`/web` 幂等启动或复用控制台并打开默认浏览器。
+- 页眉持续显示本地 Web 地址；`/web` 幂等启动或复用控制台，并打开当前工作目录对应的 Agent 工作台。
 - `Ctrl+/` 查看快捷键，`Ctrl+C` 取消当前请求，`/resume` 恢复历史会话。
 
 ## 核心能力
@@ -69,7 +69,8 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 | **Cron / Heartbeat** | interval/五段 cron、独立 session、有限指数退避、无人值守安全拒绝；heartbeat 不调用模型。 |
 | **MCP stdio** | 本地 server 握手、工具发现、动态桥接、默认审批、错误隔离和子进程清理。 |
 | **多窗口隔离** | 每个 TUI/REPL/ACP 窗口拥有独立 session；历史、活动请求、审批、取消和订阅互不串线。 |
-| **Web 控制台** | 同源页面可调用 Agent、搜索全部本地 Session，并查看消息、完整 LM 输入/响应、工具参数/输出和毫秒级时间链路。 |
+| **Web Agent 工作台** | 默认首页专注实际开发：可浏览并切换本地工作目录、新建或继续 Agent 任务、流式查看响应与工具动态，并处理审批或取消。每个目录连接独立 daemon 与安全边界。 |
+| **Session 查看** | 独立页面搜索当前工作目录下由 Web、TUI、CLI、ACP 产生的 Session；列表按本地日期分组，可折叠/展开“今天”等日期，详情按页加载对话与链路，支持继续加载，超大单条内容会显示截断提示而不会阻塞整页。 |
 | **可观测性** | 每 Session 的结构化 `.trace` 与 daemon 日志同时保留 round、Provider 首增量/总耗时、工具耗时及 `session_id/request_id` 关联。 |
 
 ## 系统如何工作
@@ -168,7 +169,7 @@ my-agent
 | `my-agent` / `my-agent tui` | 启动全屏终端界面。 |
 | `my-agent chat` | 启动普通 REPL。 |
 | `my-agent chat "检查项目"` | 发起一次性请求。 |
-| `my-agent serve --bind 127.0.0.1:8787` | 提供 Web 控制台、OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
+| `my-agent serve --bind 127.0.0.1:8787` | 提供多工作区 Web Agent 工作台、Session 查看、OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
 | `my-agent editor` | 启动标准 ACP v1 stdio server。 |
 | `my-agent status` | 查看当前工作区 daemon 与日志路径。 |
 | `my-agent sessions` | 列出稳定 session、摘要和运行状态。 |
@@ -186,7 +187,7 @@ my-agent
 
 在 TUI 输入 `/dogfood` 会在 session 文件所在目录生成 `dogfood-<session>.log`，其中包含当前 session 的原始 LLM/ReAct 对话（用户消息、助手回复、工具调用参数和工具输出），以及按 `session_id` 筛选的 daemon 全链路日志。TUI 只显示生成文件的绝对路径，不把日志正文塞入对话区。
 
-在 TUI 输入 `/web`：若控制台尚未启动，会在 `MY_AGENT_WEB_ADDR`（默认 `127.0.0.1:8787`）拉起同工作区 Web 服务；若已启动则直接复用。两种情况都会打开浏览器。页面左侧汇总 Web、TUI、CLI 与 ACP 产生的所有 Session，中间可继续对话，右侧展示结构化执行链路。
+在 TUI 输入 `/web`：若控制台尚未启动，会在 `MY_AGENT_WEB_ADDR`（默认 `127.0.0.1:8787`）拉起 Web 服务；若已启动则直接复用。打开的 URL 会携带当前工作目录。Web 首页默认是 Agent 工作台，可通过服务端目录选择器切换项目；每个项目按 canonical 路径连接自己的 daemon、Session 与 SafetyPolicy。Session 查看作为独立页面按页读取全部对话与结构化链路，底部可继续加载，避免大 Session 超过协议帧上限。
 
 <details>
 <summary><strong>HTTP / SSE / WebSocket 示例</strong></summary>
@@ -198,7 +199,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 ```
 
 - `/v1/chat/completions` 支持普通 JSON 和 OpenAI 风格 SSE。
-- `/ws` 首帧发送 `{"type":"connect","token":"..."}`，之后使用全双工 JSON-RPC 2.0。
+- `/ws` 首帧发送 `{"type":"connect","token":"...","workspace":"/absolute/project"}`，服务端校验并绑定该工作目录后，后续使用全双工 JSON-RPC 2.0。
+- `/api/directories` 为 Web 工作目录选择器提供经过鉴权的只读目录浏览；工作目录必须存在且会在服务端 canonicalize。
 - 非回环监听必须设置 `MY_AGENT_API_TOKEN`。
 - HTTP 无法弹出终端审批，因此需要审批的操作会安全拒绝。
 

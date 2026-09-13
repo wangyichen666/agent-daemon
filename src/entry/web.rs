@@ -22,8 +22,8 @@ struct HealthResponse {
 
 enum ProbeResult {
     Missing,
-    Healthy(PathBuf),
-    Unhealthy(PathBuf),
+    Healthy,
+    Unhealthy,
 }
 
 pub fn configured_address() -> Result<SocketAddr> {
@@ -52,24 +52,23 @@ pub async fn ensure_running(workspace: &Path) -> Result<WebLaunch> {
     if !address.ip().is_loopback() {
         bail!("TUI /web 只允许自动启动回环地址，当前为 {address}");
     }
-    let url = format!("http://{address}");
-    match probe(&url).await? {
-        ProbeResult::Healthy(existing_workspace) => {
-            ensure_same_workspace(&workspace, &existing_workspace, &url)?;
+    let base_url = format!("http://{address}");
+    let url = workspace_url(&base_url, &workspace)?;
+    match probe(&base_url).await? {
+        ProbeResult::Healthy => {
             return Ok(WebLaunch {
                 url,
                 started: false,
             });
         }
-        ProbeResult::Unhealthy(existing_workspace) => {
-            ensure_same_workspace(&workspace, &existing_workspace, &url)?;
+        ProbeResult::Unhealthy => {
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                if matches!(probe(&url).await?, ProbeResult::Missing) {
+                if matches!(probe(&base_url).await?, ProbeResult::Missing) {
                     break;
                 }
             }
-            if !matches!(probe(&url).await?, ProbeResult::Missing) {
+            if !matches!(probe(&base_url).await?, ProbeResult::Missing) {
                 bail!("旧 Web 服务仍在退出，请稍后重试 /web");
             }
         }
@@ -80,12 +79,11 @@ pub async fn ensure_running(workspace: &Path) -> Result<WebLaunch> {
     let mut last_error = None;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        match probe(&url).await {
-            Ok(ProbeResult::Healthy(existing_workspace)) => {
-                ensure_same_workspace(&workspace, &existing_workspace, &url)?;
+        match probe(&base_url).await {
+            Ok(ProbeResult::Healthy) => {
                 return Ok(WebLaunch { url, started: true });
             }
-            Ok(ProbeResult::Missing | ProbeResult::Unhealthy(_)) => {}
+            Ok(ProbeResult::Missing | ProbeResult::Unhealthy) => {}
             Err(error) => last_error = Some(error),
         }
     }
@@ -114,24 +112,21 @@ async fn probe(url: &str) -> Result<ProbeResult> {
     };
     let status = response.status();
     let health: HealthResponse = response.json().await.context("Web 健康检查响应格式无效")?;
+    let _ = health.workspace;
     if status.is_success() {
-        Ok(ProbeResult::Healthy(health.workspace))
+        Ok(ProbeResult::Healthy)
     } else if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        Ok(ProbeResult::Unhealthy(health.workspace))
+        Ok(ProbeResult::Unhealthy)
     } else {
         bail!("{url} 已有服务响应，但健康检查返回 {status}")
     }
 }
 
-fn ensure_same_workspace(expected: &Path, actual: &Path, url: &str) -> Result<()> {
-    let actual = std::fs::canonicalize(actual).unwrap_or_else(|_| actual.to_path_buf());
-    if actual == expected {
-        return Ok(());
-    }
-    bail!(
-        "{url} 已被另一工作区占用：{}；请设置不同的 MY_AGENT_WEB_ADDR",
-        actual.display()
-    )
+fn workspace_url(base_url: &str, workspace: &Path) -> Result<String> {
+    let mut url = reqwest::Url::parse(base_url).context("Web 地址格式无效")?;
+    url.query_pairs_mut()
+        .append_pair("workspace", &workspace.to_string_lossy());
+    Ok(url.into())
 }
 
 fn spawn_web_process(workspace: &Path, address: SocketAddr) -> Result<()> {
@@ -210,11 +205,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_different_workspace_for_an_occupied_address() {
-        let expected = Path::new("/workspace/one");
-        let actual = Path::new("/workspace/two");
-        let error = ensure_same_workspace(expected, actual, "http://127.0.0.1:8787")
-            .expect_err("不同工作区必须拒绝复用");
-        assert!(error.to_string().contains("另一工作区"));
+    fn workspace_url_carries_the_requested_directory() {
+        let url = workspace_url("http://127.0.0.1:8787", Path::new("/workspace/one two"))
+            .expect("工作区 URL 应可生成");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:8787/?workspace=%2Fworkspace%2Fone+two"
+        );
     }
 }

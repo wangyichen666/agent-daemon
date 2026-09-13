@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>my-agent · 本地控制台</title>
+    <title>my-agent · 本地工作台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -14,89 +14,202 @@
           <span class="brand-mark">✦</span>
           <div>
             <strong>my-agent</strong>
-            <span>local operations console</span>
+            <span>local coding workspace</span>
           </div>
         </div>
+
+        <nav class="primary-nav" aria-label="主要功能">
+          <button class="active" data-view="agent" type="button">Agent 工作台</button>
+          <button data-view="sessions" type="button">Session 查看</button>
+        </nav>
+
         <div class="topbar-actions">
-          <span id="connection" class="connection is-connecting"><i></i>正在连接 daemon</span>
-          <button id="refresh" class="icon-button" type="button" title="刷新">↻</button>
+          <button id="workspace-trigger" class="workspace-trigger" type="button" title="切换 Agent 工作目录">
+            <span>工作目录</span>
+            <strong id="workspace-label">正在读取…</strong>
+            <i>⌄</i>
+          </button>
+          <span id="connection" class="connection is-connecting"><i></i><span>正在连接 daemon</span></span>
           <button id="settings" class="icon-button" type="button" title="连接设置">•••</button>
         </div>
       </header>
 
-      <main class="workspace-grid">
-        <aside class="session-panel panel">
-          <div class="panel-heading">
-            <div>
-              <span class="eyebrow">Workspace memory</span>
-              <h1>Sessions</h1>
-            </div>
-            <span id="session-count" class="count">0</span>
-          </div>
-          <button id="new-session" class="primary-button" type="button">
-            <span>＋</span> 新建会话
-          </button>
-          <label class="search-box">
-            <span>⌕</span>
-            <input id="session-search" type="search" placeholder="搜索会话或首条问题" />
-          </label>
-          <div class="session-legend">
-            <span><i class="dot running"></i>运行中</span>
-            <span><i class="dot waiting"></i>待审批</span>
-          </div>
-          <div id="session-list" class="session-list" aria-live="polite"></div>
-        </aside>
+      <main>
+        <section id="agent-view" class="view is-active" aria-labelledby="agent-page-title">
+          <div class="agent-layout">
+            <section class="conversation-panel panel">
+              <div class="conversation-heading">
+                <div>
+                  <span class="eyebrow">Build with your local agent</span>
+                  <h1 id="agent-page-title">Agent 工作台</h1>
+                  <p id="agent-meta">选择工作目录，然后把开发任务交给 Agent。</p>
+                </div>
+                <div class="heading-actions">
+                  <button id="cancel-turn" class="quiet-button danger hidden" type="button">停止本轮</button>
+                  <button id="new-agent-session" class="primary-button compact" type="button">＋ 新建任务</button>
+                </div>
+              </div>
 
-        <section class="conversation-panel panel">
-          <div class="conversation-heading">
-            <div>
-              <span class="eyebrow">Agent workspace</span>
-              <h2 id="conversation-title">选择一个 Session</h2>
-              <p id="conversation-meta">所有入口产生的会话都会出现在这里</p>
-            </div>
-            <button id="cancel-turn" class="quiet-button danger hidden" type="button">停止本轮</button>
+              <div id="agent-transcript" class="transcript">
+                <div class="empty-state agent-empty">
+                  <span class="empty-orbit">✦</span>
+                  <h2>让 Agent 真正在项目里工作</h2>
+                  <p>选择一个本地目录，Agent 的读取、编辑、命令执行和 Session 都会严格绑定在这个工作区。</p>
+                  <div class="starter-grid">
+                    <button type="button" data-starter="分析这个项目的结构，并告诉我最值得优先改进的三个地方。">分析项目结构</button>
+                    <button type="button" data-starter="运行项目测试，定位失败原因并修复。">运行并修复测试</button>
+                    <button type="button" data-starter="阅读当前项目，帮我实现一个合理的小功能并完成验证。">开始开发功能</button>
+                  </div>
+                </div>
+              </div>
+
+              <form id="composer" class="composer">
+                <textarea id="prompt" rows="3" placeholder="描述你希望 Agent 在当前工作目录完成的任务…" disabled></textarea>
+                <div class="composer-footer">
+                  <div class="composer-context">
+                    <span class="context-dot"></span>
+                    <span id="composer-workspace">尚未连接工作目录</span>
+                  </div>
+                  <div class="composer-actions">
+                    <span><kbd>⌘</kbd><kbd>Enter</kbd> 发送</span>
+                    <button id="send" class="send-button" type="submit" disabled>交给 Agent <span>↗</span></button>
+                  </div>
+                </div>
+              </form>
+            </section>
+
+            <aside class="activity-panel panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Live execution</span>
+                  <h2>Agent 动态</h2>
+                </div>
+                <span id="agent-status" class="status-pill">空闲</span>
+              </div>
+              <div class="workspace-card">
+                <span>当前工作目录</span>
+                <strong id="workspace-path">—</strong>
+                <button id="change-workspace" type="button">切换目录</button>
+              </div>
+              <div class="task-card">
+                <span>当前 Session</span>
+                <strong id="agent-session-id">尚未选择</strong>
+                <button id="inspect-current" type="button" disabled>查看完整 Session 与链路</button>
+              </div>
+              <div class="activity-heading">
+                <strong>本轮执行</strong>
+                <span>实时</span>
+              </div>
+              <div id="activity-list" class="activity-list" aria-live="polite">
+                <div class="activity-empty">发出任务后，这里会显示模型思考、工具执行和审批状态。</div>
+              </div>
+            </aside>
           </div>
-          <div id="transcript" class="transcript">
-            <div class="empty-state">
-              <span class="empty-orbit">✦</span>
-              <h3>一个本地 Agent，两种工作视角</h3>
-              <p>在这里发起任务，或从左侧打开 TUI、CLI 与 Web 产生的任意 Session。</p>
-            </div>
-          </div>
-          <form id="composer" class="composer">
-            <textarea id="prompt" rows="2" placeholder="给本地 Agent 一个任务…" disabled></textarea>
-            <div class="composer-footer">
-              <span><kbd>⌘</kbd><kbd>Enter</kbd> 发送</span>
-              <button id="send" class="send-button" type="submit" disabled>发送 <span>↗</span></button>
-            </div>
-          </form>
         </section>
 
-        <aside class="trace-panel panel">
-          <div class="panel-heading trace-heading">
-            <div>
-              <span class="eyebrow">Execution lens</span>
-              <h2>链路详情</h2>
-            </div>
-            <span id="trace-count" class="count">0</span>
+        <section id="sessions-view" class="view" aria-labelledby="sessions-page-title">
+          <div class="session-layout">
+            <aside class="session-panel panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Workspace history</span>
+                  <h1 id="sessions-page-title">Sessions</h1>
+                </div>
+                <span id="session-count" class="count">0</span>
+              </div>
+              <div class="session-workspace" id="session-workspace">当前工作区</div>
+              <label class="search-box">
+                <span>⌕</span>
+                <input id="session-search" type="search" placeholder="搜索 Session 或任务内容" />
+              </label>
+              <div class="session-toolbar">
+                <span><i class="dot running"></i>运行中</span>
+                <span><i class="dot waiting"></i>待审批</span>
+                <button id="refresh" type="button">↻ 刷新</button>
+              </div>
+              <div id="session-list" class="session-list" aria-live="polite"></div>
+            </aside>
+
+            <section class="session-detail panel">
+              <div class="conversation-heading">
+                <div>
+                  <span class="eyebrow">Conversation record</span>
+                  <h2 id="session-title">选择一个 Session</h2>
+                  <p id="session-meta">查看 Web、TUI、CLI 与 ACP 产生的历史会话。</p>
+                </div>
+                <button id="continue-session" class="primary-button compact" type="button" disabled>在 Agent 工作台继续</button>
+              </div>
+              <div id="session-transcript" class="transcript readonly-transcript">
+                <div class="empty-state">
+                  <span class="empty-orbit">⌁</span>
+                  <h2>选择左侧 Session</h2>
+                  <p>这里展示完整对话；右侧展示发送给模型的提示词、模型响应、工具调用和每段耗时。</p>
+                </div>
+              </div>
+              <div id="message-pager" class="session-pager hidden">
+                <span id="message-progress">—</span>
+                <button id="load-more-messages" class="quiet-button compact" type="button">加载更多消息</button>
+              </div>
+            </section>
+
+            <aside class="trace-panel panel">
+              <div class="panel-heading trace-heading">
+                <div>
+                  <span class="eyebrow">Execution lens</span>
+                  <h2>链路详情</h2>
+                </div>
+                <span id="trace-count" class="count">0</span>
+              </div>
+              <div id="trace-summary" class="trace-summary">
+                <div><strong>—</strong><span>模型调用</span></div>
+                <div><strong>—</strong><span>工具调用</span></div>
+                <div><strong>—</strong><span>总耗时</span></div>
+              </div>
+              <div class="trace-filter" role="tablist">
+                <button class="active" data-filter="all" type="button">全部</button>
+                <button data-filter="model" type="button">LM</button>
+                <button data-filter="tool" type="button">工具</button>
+                <button data-filter="turn" type="button">Turn</button>
+              </div>
+              <div id="trace-list" class="trace-list">
+                <div class="trace-empty">选择 Session 后显示完整执行链路。</div>
+              </div>
+              <div id="trace-pager" class="session-pager hidden">
+                <span id="trace-progress">—</span>
+                <button id="load-more-traces" class="quiet-button compact" type="button">加载更多链路</button>
+              </div>
+            </aside>
           </div>
-          <div id="trace-summary" class="trace-summary">
-            <div><strong>—</strong><span>模型调用</span></div>
-            <div><strong>—</strong><span>工具调用</span></div>
-            <div><strong>—</strong><span>总耗时</span></div>
-          </div>
-          <div class="trace-filter" role="tablist">
-            <button class="active" data-filter="all" type="button">全部</button>
-            <button data-filter="model" type="button">LM</button>
-            <button data-filter="tool" type="button">工具</button>
-            <button data-filter="turn" type="button">Turn</button>
-          </div>
-          <div id="trace-list" class="trace-list">
-            <div class="trace-empty">选择 Session 后显示完整执行链路。</div>
-          </div>
-        </aside>
+        </section>
       </main>
     </div>
+
+    <dialog id="workspace-dialog" class="wide-dialog">
+      <form method="dialog" class="settings-card workspace-picker">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">Agent working directory</span>
+            <h2>选择工作目录</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+        </div>
+        <p>每个目录使用独立 daemon、Session 与安全边界。Agent 只能在所选工作目录范围内开发。</p>
+        <div class="path-entry">
+          <input id="browse-path" type="text" autocomplete="off" aria-label="工作目录绝对路径" />
+          <button id="browse-go" class="quiet-button" type="button">打开</button>
+        </div>
+        <div id="workspace-favorites" class="workspace-favorites"></div>
+        <div class="browser-heading">
+          <button id="browse-parent" class="quiet-button" type="button">↑ 上一级</button>
+          <span id="browse-current">—</span>
+        </div>
+        <div id="directory-list" class="directory-list" aria-live="polite"></div>
+        <div class="dialog-actions">
+          <button class="quiet-button" value="cancel">取消</button>
+          <button id="select-workspace" class="primary-button compact" type="button">选择当前目录</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog id="settings-dialog">
       <form method="dialog" class="settings-card">
@@ -112,7 +225,7 @@
           <input id="token" type="password" autocomplete="off" placeholder="仅非回环绑定时需要" />
         </label>
         <p>Token 只保存在当前浏览器的 localStorage，不会写入 Session。</p>
-        <button id="reconnect" class="primary-button" value="cancel" type="button">保存并重新连接</button>
+        <button id="reconnect" class="primary-button compact full-width" value="cancel" type="button">保存并重新连接</button>
       </form>
     </dialog>
 

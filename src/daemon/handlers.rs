@@ -4,13 +4,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{Instrument, info, info_span};
 
-use super::protocol::{EventKind, JsonRpcRequest, JsonRpcResponse, RequestId, ServerFrame};
+use super::approval::PendingApprovalInfo;
+use super::protocol::{
+    EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
+};
 use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
 use crate::cron::ScheduleSpec;
 use crate::loop_engine::{AgentEvent, CancellationToken};
@@ -22,6 +25,10 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INTERNAL_ERROR: i64 = -32603;
 const REQUEST_CANCELLED: i64 = -32800;
 const REQUEST_CONFLICT: i64 = -32001;
+const WEB_PAGE_MAX_BYTES: usize = MAX_FRAME_BYTES - 256 * 1024;
+const WEB_PAGE_MAX_ITEM_BYTES: usize = 256 * 1024;
+const WEB_PAGE_DEFAULT_LIMIT: usize = 80;
+const WEB_PAGE_MAX_LIMIT: usize = 200;
 
 #[derive(Deserialize)]
 struct ChatSendParams {
@@ -46,6 +53,19 @@ struct CancelParams {
 #[derive(Deserialize)]
 struct SessionResumeParams {
     session_id: String,
+}
+
+#[derive(Deserialize)]
+struct SessionPageParams {
+    session_id: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_web_page_limit")]
+    limit: usize,
+}
+
+fn default_web_page_limit() -> usize {
+    WEB_PAGE_DEFAULT_LIMIT
 }
 
 #[derive(Deserialize, Default)]
@@ -76,6 +96,13 @@ impl DaemonState {
                 };
                 send_result(&frames, request.id, result);
             }
+            "session.load_page" => {
+                let result = match parse_params::<SessionPageParams>(&request.params) {
+                    Ok(params) => self.session_load_page(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
             "session.list" => {
                 let result = self.session_list().await;
                 send_result(&frames, request.id, result);
@@ -94,6 +121,13 @@ impl DaemonState {
             "session.trace" => {
                 let result = match parse_params::<SessionResumeParams>(&request.params) {
                     Ok(params) => self.session_trace(&params.session_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.trace_page" => {
+                let result = match parse_params::<SessionPageParams>(&request.params) {
+                    Ok(params) => self.session_trace_page(params).await,
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -380,6 +414,34 @@ impl DaemonState {
         self.session_snapshot(&runtime.id).await
     }
 
+    async fn session_load_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
+        let runtime = self.session_runtime(Some(&params.session_id)).await?;
+        let history = runtime
+            .store
+            .load()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let total_messages = history.len();
+        let limit = params.limit.clamp(1, WEB_PAGE_MAX_LIMIT);
+        let (messages, has_more) = bounded_json_page(
+            history.into_iter().skip(params.offset),
+            limit,
+            "消息过大，已截断；可缩小加载范围查看其余 Session 内容",
+        );
+        let (active_requests, approvals, status) = self.session_activity(&runtime.id).await?;
+        Ok(json!({
+            "session_id": runtime.id,
+            "messages": messages,
+            "offset": params.offset,
+            "limit": limit,
+            "total_messages": total_messages,
+            "has_more": has_more,
+            "pending_approvals": approvals,
+            "active_requests": active_requests,
+            "status": status,
+        }))
+    }
+
     async fn session_snapshot(&self, session_id: &str) -> Result<Value, (i64, String)> {
         // 活动 turn（尤其是等待人工审批时）会长期持有内存历史锁。恢复端必须仍能
         // 立即读取快照，因此以每条消息均已 flush 的 append-only 会话文件为来源。
@@ -439,6 +501,63 @@ impl DaemonState {
             "session_id": session_id,
             "records": records,
         }))
+    }
+
+    async fn session_trace_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
+        let runtime = self.session_runtime(Some(&params.session_id)).await?;
+        let records = runtime
+            .store
+            .load_trace()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let total_records = records.len();
+        let limit = params.limit.clamp(1, WEB_PAGE_MAX_LIMIT);
+        let (records, has_more) = bounded_json_page(
+            records.into_iter().skip(params.offset),
+            limit,
+            "链路记录过大，已截断；可继续加载其余记录",
+        );
+        Ok(json!({
+            "session_id": runtime.id,
+            "records": records,
+            "offset": params.offset,
+            "limit": limit,
+            "total_records": total_records,
+            "has_more": has_more,
+        }))
+    }
+
+    async fn session_activity(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<RequestId>, Vec<PendingApprovalInfo>, &'static str), (i64, String)> {
+        let active = self.active.lock().await;
+        let active_requests = active
+            .keys()
+            .filter(|key| key.session_id == session_id)
+            .map(|key| key.request_id.clone())
+            .collect::<Vec<RequestId>>();
+        let request_ids = active
+            .keys()
+            .filter(|key| key.session_id == session_id)
+            .map(|key| key.request_id.clone())
+            .collect::<HashSet<RequestId>>();
+        drop(active);
+        let approvals = self
+            .approvals
+            .pending_for_session(Some(session_id))
+            .await
+            .into_iter()
+            .filter(|approval| request_ids.contains(&approval.request_id))
+            .collect::<Vec<_>>();
+        let status = if !approvals.is_empty() {
+            "waiting"
+        } else if !active_requests.is_empty() {
+            "running"
+        } else {
+            "idle"
+        };
+        Ok((active_requests, approvals, status))
     }
 
     async fn session_infos(&self) -> Result<Vec<crate::session::SessionInfo>, (i64, String)> {
@@ -963,6 +1082,81 @@ impl DaemonState {
     }
 }
 
+fn bounded_json_page<T: Serialize>(
+    mut items: impl Iterator<Item = T>,
+    limit: usize,
+    oversized_message: &str,
+) -> (Vec<Value>, bool) {
+    let mut values = Vec::new();
+    let mut used_bytes = 1024;
+    let mut has_more = false;
+    for _ in 0..limit {
+        let Some(item) = items.next() else {
+            return (values, false);
+        };
+        let value = serde_json::to_value(item).unwrap_or_else(|_| {
+            json!({
+                "truncated": true,
+                "content": "该记录无法序列化，已隐藏"
+            })
+        });
+        let value = compact_json_for_web(value, WEB_PAGE_MAX_ITEM_BYTES, oversized_message);
+        let item_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+        if !values.is_empty() && used_bytes + item_bytes + 1 > WEB_PAGE_MAX_BYTES {
+            has_more = true;
+            break;
+        }
+        values.push(value);
+        used_bytes += item_bytes + 1;
+    }
+    if !has_more && items.next().is_some() {
+        has_more = true;
+    }
+    (values, has_more)
+}
+
+fn compact_json_for_web(value: Value, max_bytes: usize, message: &str) -> Value {
+    let original_bytes = serde_json::to_vec(&value).map_or(max_bytes + 1, |bytes| bytes.len());
+    if original_bytes <= max_bytes {
+        return value;
+    }
+    for max_chars in [65_536, 16_384, 4_096, 1_024, 256] {
+        let mut candidate = value.clone();
+        truncate_json_strings(&mut candidate, max_chars);
+        let candidate_bytes =
+            serde_json::to_vec(&candidate).map_or(max_bytes + 1, |bytes| bytes.len());
+        if candidate_bytes <= max_bytes {
+            return candidate;
+        }
+    }
+    json!({
+        "truncated": true,
+        "content": format!("{message}（原始大小约 {original_bytes} 字节）")
+    })
+}
+
+fn truncate_json_strings(value: &mut Value, max_chars: usize) {
+    match value {
+        Value::String(text) if text.chars().count() > max_chars => {
+            let marker = "… [已截断]";
+            let keep = max_chars.saturating_sub(marker.chars().count());
+            let prefix = text.chars().take(keep).collect::<String>();
+            *text = format!("{prefix}{marker}");
+        }
+        Value::Array(items) => {
+            for item in items {
+                truncate_json_strings(item, max_chars);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                truncate_json_strings(field, max_chars);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn parse_cron_add(args: &[String]) -> anyhow::Result<(String, ScheduleSpec, String, u32, u64)> {
     let name = args[1].clone();
     let schedule = if let Some(seconds) = args[2].strip_prefix("interval=") {
@@ -1216,7 +1410,9 @@ fn is_resolved_approval(update: &ActiveRequestUpdate, pending_ids: &HashSet<Stri
 mod dogfood_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::export_dogfood_file;
+    use super::{WEB_PAGE_MAX_BYTES, bounded_json_page, export_dogfood_file};
+    use crate::daemon::protocol::{JsonRpcResponse, RequestId, encode_frame};
+    use crate::provider::{Message, Role};
 
     static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
 
@@ -1263,5 +1459,25 @@ mod dogfood_tests {
         assert!(!content.contains('\x1b'));
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bounds_large_web_pages_and_marks_oversized_content() {
+        let messages = (0..80)
+            .map(|_| Message::text(Role::Tool, "x".repeat(300 * 1024)))
+            .collect::<Vec<_>>();
+        let (items, has_more) = bounded_json_page(messages.into_iter(), 80, "消息过大，已截断");
+        let encoded = serde_json::to_vec(&items).unwrap();
+        assert!(encoded.len() <= WEB_PAGE_MAX_BYTES);
+        let frame = encode_frame(&JsonRpcResponse::success(
+            RequestId::Number(1),
+            serde_json::json!({"messages": items.clone()}),
+        ))
+        .unwrap();
+        assert!(frame.len() <= crate::daemon::protocol::MAX_FRAME_BYTES + 1);
+        assert!(has_more);
+        assert!(items.len() < 80);
+        assert_eq!(items[0]["role"], "tool");
+        assert!(items[0]["content"].as_str().unwrap().contains("已截断"));
     }
 }

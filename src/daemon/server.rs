@@ -533,6 +533,28 @@ mod tests {
         }));
         assert_eq!(records.last().unwrap()["kind"], "turn_completed");
 
+        let load_page = crate::entry::cli::request_result(
+            &client,
+            "session.load_page",
+            json!({"session_id": original_session_id, "offset": 0, "limit": 1}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(load_page["total_messages"], 2);
+        assert_eq!(load_page["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(load_page["has_more"], true);
+
+        let trace_page = crate::entry::cli::request_result(
+            &client,
+            "session.trace_page",
+            json!({"session_id": original_session_id, "offset": 0, "limit": 2}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(trace_page["total_records"], records.len());
+        assert_eq!(trace_page["records"].as_array().unwrap().len(), 2);
+        assert_eq!(trace_page["has_more"], true);
+
         let mut new_session = client.request("session.new", json!({})).await.unwrap();
         let ServerFrame::Response(new_session) = new_session.next().await.unwrap() else {
             panic!("预期 session.new 响应");

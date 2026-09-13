@@ -462,3 +462,66 @@
 | 新增 `ApiState.workspace` 后测试 fixture 漏填字段 | 1 | `cargo check --all-targets` 精确定位；为唯一测试构造器补入当前工作区 |
 | 首次 CUA 初始化调用漏传 `code`，随后又误用了不可用的 `tools` 全局 | 1 | 两次均未操作页面；读取工具返回的正式 API 后改用 `cua.getState/createBrowserTab` |
 | CUA 创建标签时误传不支持的 `max_output_chars`，并尝试了不可用的 Chrome provider | 1 | 根据 schema 移除多余字段，枚举可用浏览器后改用 Codex in-app browser |
+
+# Web Agent 工作台与工作目录（2026-09-13）
+
+## 目标
+
+把 Web 控制台重构为两个一级功能：以 Session/链路审计为核心的查看页，以及以实际开发工作为核心的 Agent 对话页；Agent 对话在创建会话时可选择本地工作目录，并确保 daemon、工具安全边界、会话持久化和页面展示都与所选目录一致。
+
+## 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 0. 工作区与会话模型审计 | complete | 明确现有 daemon 单工作区边界、Web 生命周期、Session RPC 和工具工作目录约束 |
+| 1. 多工作区后端契约 | complete | Web 可列出/校验目录并为所选目录连接或启动对应 daemon，Session 数据按工作区隔离 |
+| 2. Agent 工作台前端 | complete | Agent 对话成为一级主界面，支持目录选择、新建对话、流式工作、审批、取消与状态反馈 |
+| 3. Session 查看前端 | complete | Session 浏览与链路详情成为独立一级页面，可切换工作区并查看历史记录 |
+| 4. 兼容、测试与交付 | complete | TUI `/web` 保持可用，完成单测/集成/浏览器验收、fmt、Clippy、全量测试、安装和文档更新 |
+
+## 本轮约束
+
+- 工作目录必须经过 canonicalize/存在性校验，不能由浏览器直接绕过 SafetyPolicy。
+- 一个已有 daemon 仍只负责一个工作区；优先在 Web 服务层按目录管理 daemon 连接，不把运行时安全边界改成可变全局状态。
+- Agent 工作是默认主路径，日志和 trace 是独立的 Session 查看能力，不喧宾夺主。
+- 保持现有 `/web` 默认工作区与旧 Session 的兼容性。
+
+## 本轮错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+| 重写 `web/index.html` 时在同一补丁中同时 Delete/Add 同一路径，被 apply_patch 拒绝 | 1 | 补丁未落盘；改为分两次 Delete/Add，不重复该补丁结构 |
+| 一次 `cargo test` 传入两个独立测试过滤串，Cargo 拒绝第二个参数 | 1 | JS 检查已通过；改为分别运行两个过滤串，serve 7 项与 web 2 项均通过 |
+| 更新阶段记录时两次使用了不稳定的跨章节锚点，补丁未命中 | 2 | 读取文件末尾确认最终记录已在本节，后续只用本节内唯一完整行更新 |
+| `rg` 查询字符串包含未安全引用的反引号，zsh 将其当作命令替换 | 1 | 未产生文件修改；后续 shell 搜索避免反引号或使用安全单引号参数 |
+| 浏览器隔离验收首次选择 127.0.0.1:18789，该端口已被占用 | 1 | daemon 已正常拉起但 Web 未启动；改用系统分配的空闲端口，不重复固定端口 |
+| CUA 选择 Agent 工作台按钮时未使用 exact，和“在 Agent 工作台继续”发生严格匹配冲突 | 1 | 页面没有发生点击；后续对同名按钮使用 `exact: true`，不重复模糊定位 |
+| CUA 调用重复误传了已知不支持的 `max_output_chars` 字段 | 2 | 调用在参数校验阶段失败、未创建页面；后续严格只传 `code`/`title`/`timeout_ms` |
+| CUA 误用不存在的 `tab.playwright.dom.setViewportSize` 与 REPL `text()` helper | 1 | 页面已正常创建；停止猜测辅助 API，后续仅使用已确认可用的 `tab.playwright.domSnapshot()` 与交互接口 |
+
+# Session 日志帧超限修复（2026-09-13）
+
+## 目标
+
+修复 Web Session 查看页读取大 Session 失败的问题。当前 `session.load`/`session.trace` 将整个 JSONL 一次性放入 daemon 协议帧；截图显示 7,643,140 字节响应超过 4,194,304 字节限制，导致消息和链路全部无法展示。
+
+## 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 0. 根因确认 | complete | 确认超限发生在整包 Session/trace RPC 返回，而非前端渲染；梳理兼容边界 |
+| 1. 分页 RPC | complete | daemon 提供有界的消息与 trace 分页结果，单帧留出协议开销 |
+| 2. Web 增量查看 | complete | Session 页面首屏可见、可继续加载，不因单条大内容阻塞整页 |
+| 3. 回归与交付 | complete | 大数据测试、全量测试、格式/Clippy/前端检查通过并更新文档 |
+
+## 本轮约束
+
+- 保留旧 `session.load`/`session.trace` RPC 兼容性；Web 改用分页方法，Agent 运行时仍从本地完整 Session 文件恢复历史。
+- 单次 Web 响应必须显式受字节预算约束，不能只依赖消息条数；必要时对超大展示字段给出可见的截断标记。
+- 不提高全局 `MAX_FRAME_BYTES`，避免把协议层内存/拒绝服务风险转嫁给所有客户端。
+
+## 本轮错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+| 首个大消息分页测试误假设单条消息会立即触发页满，实际单条内容先被压缩后仍可与后续项同页 | 1 | 改为构造多条 300 KiB 消息，验证页级字节预算、`has_more` 和截断标记，不重复该断言 |
