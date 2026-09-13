@@ -74,6 +74,7 @@
 
 | 错误 | 次数 | 处理 |
 |---|---:|---|
+| 验收启动 Web 时仅设置 `MY_AGENT_WEB_ADDR`，但该变量只影响 TUI launcher，serve 仍使用默认 8787 导致端口占用 | 1 | 读取 `my-agent serve --help`，改用 `--bind 127.0.0.1:18882` 后重试 |
 | `view_image` 不支持直接读取 SVG 品牌封面 | 1 | 改用本机 SVG 渲染工具生成临时 PNG 后检查，不重复直接读取 SVG |
 | plan 首轮 clippy 报 `PlanStore::in_memory` 为 dead code | 1 | 该构造器只用于单元测试，限定为 `#[cfg(test)]` 后重跑全套验证 |
 | sub_agent 首次大补丁被 `apply_patch` 拒绝（同一文件重复 Update 段） | 1 | 补丁未落盘；改为每个文件单一 Update 段的原子补丁 |
@@ -557,3 +558,37 @@
 - Web 权限菜单已在隔离发布版服务中验证，默认显示“帮我批准”，弹窗展示三档选项和灾难性命令硬拦截说明。
 - TUI `/permissions` 与 Web `permissions.get/set` 已通过共享状态回归测试；全量测试 136/136、Clippy、rustfmt、Node 语法和 diff 检查通过。
 - 发布版已重新构建并安装到 `/Users/pilot/.cargo/bin/my-agent` 与 `/Users/pilot/.local/bin/my-agent`，二进制逐字节一致。
+## Web Agent 流式与 Markdown 优化（2026-09-13）
+
+### 目标
+
+1. Agent 工作台默认不展开工具调用与工具输出，只显示紧凑的执行摘要。
+2. 模型响应按 WebSocket 增量事件实时更新，首字节到达后立即出现在对话中。
+3. 模型返回的 Markdown 在页面安全解析为标题、列表、代码、链接等语法。
+
+### 阶段
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 0. 现状审计 | complete | 确认 Web 事件处理、工具动态 DOM 和现有内容渲染边界 |
+| 1. 工具默认折叠 | complete | 工具调用/输出默认收起，仍可主动展开查看 |
+| 2. 流式与 Markdown | complete | 增量响应不被快照覆盖，Markdown 渲染安全且持续更新 |
+| 3. 回归与交付 | complete | 前端/后端测试、浏览器验收、构建安装和推送完成 |
+
+### 约束
+
+- 保留现有审批、取消、Session 持久化和链路审计，不改变 daemon 协议语义。
+- Markdown 不能执行脚本或注入任意 HTML；链接使用安全协议，代码块保留可复制文本。
+- 工具详情只改变默认视觉状态，不删除 Session 中的工具与 trace 数据。
+
+### 错误记录
+
+| 错误 | 次数 | 处理 |
+|---|---:|---|
+| CUA 按可访问名称 `textbox[name=prompt]` 未匹配到 textarea | 2 | 改用稳定 DOM id `#prompt` 定位，后续不再使用无名 textbox 角色查询 |
+
+### 当前验收记录
+
+- 隔离发布版验证响应首段到达时状态为“生成响应”、存在流式光标；完成后 Markdown 标题、列表、代码块和安全链接均生成语义 DOM。
+- 工具调用与工具输出数据仍保留在消息和活动状态中，但默认放入关闭的 `<details>`，用户可主动展开查看。
+- 全量测试 136/136、Clippy、rustfmt、Node 语法、嵌入资源测试和 diff 检查通过；release 已构建并安装到 PATH，准备提交推送。

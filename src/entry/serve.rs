@@ -991,11 +991,17 @@ mod tests {
         assert!(WEB_APP.contains("loadMoreTraces"));
         assert!(WEB_APP.contains("permissions.get"));
         assert!(WEB_APP.contains("permissions.set"));
+        assert!(WEB_APP.contains("scheduleAgentTranscriptRender"));
+        assert!(WEB_APP.contains("renderMarkdown"));
+        assert!(WEB_APP.contains("safeMarkdownUrl"));
+        assert!(WEB_APP.contains("工具动态 · "));
         assert!(WEB_APP.contains("workspace:"));
         assert!(WEB_APP.contains("sessionDayKey"));
         assert!(WEB_APP.contains("toggleSessionDay"));
         assert!(WEB_STYLES.contains(".agent-layout"));
         assert!(WEB_STYLES.contains(".session-day.is-collapsed"));
+        assert!(WEB_STYLES.contains(".streaming-cursor"));
+        assert!(WEB_STYLES.contains(".tool-details"));
     }
 
     #[test]

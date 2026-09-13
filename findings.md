@@ -459,3 +459,7 @@
 - 新增模式语义：`request_approval` 对工作区内写/编辑以及可识别的联网命令也询问；`risk_approval` 保持现有风险边界；`full_access` 放行工作区外读取、风险命令和 MCP 审批，但仍拒绝灾难性命令。
 - SafetyPolicy 模式以共享 `AtomicU8` 存在于 daemon 生命周期内，Web RPC 与 TUI slash 通过同一 daemon 即时同步；Cron 使用独立安全策略，不受交互模式影响。
 - Web 顶部权限菜单采用用户截图的三项文案和选中态；TUI 新增 `/permissions [request|risk|full]`，`/permission`、`/mode` 为别名。
+- 当前 WebSocket 的 `chat.send` 已通过 `text_delta` 增量事件驱动前端；问题在于前端每个增量都重建整个 transcript，且 `renderMessage` 使用 `escapeHtml`，所以 Markdown 不会解析。
+- Agent Session 快照中的 `tool_calls` 与 `tool` 角色消息会被直接渲染；右侧 `activities` 也会展示工具状态。本轮应保留数据和状态，但默认通过折叠容器隐藏详情，审批卡仍保持可见。
+- 项目没有前端打包/npm 依赖；应在 `web/app.js` 内实现无外部依赖的安全 Markdown 渲染器，白名单 HTML 标签并限制链接协议，避免引入供应链或 XSS 风险。
+- 流式响应不能依赖“完成后重新加载快照”才能显示；当前 `text_delta` 已更新草稿对象，需确保渲染不会因快照刷新覆盖增量，并对长文本减少不必要的滚动/重绘开销。

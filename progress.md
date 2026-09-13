@@ -249,3 +249,10 @@
 - [x] 新增 SafetyPolicy、slash、daemon RPC、嵌入 Web 资源回归；当前 136/136 全量测试、Clippy、rustfmt、JS 检查均通过。
 - [x] 重新构建/安装并完成 Web/TUI 真实界面验收；全量测试 136/136、Clippy、rustfmt、Node 语法与 diff 检查通过，发布版已同步到 PATH。
 - [x] 权限模式改动已准备提交并推送到 `origin/main`。
+
+# 2026-09-13 Web 流式与 Markdown 优化
+
+- [x] Agent 对话中的工具调用、工具输出和右侧工具动态默认收起，详情仍可主动展开。
+- [x] WebSocket `text_delta` 改为帧级批量重绘，流式生成期间显示光标和“生成响应”状态。
+- [x] 内置安全 Markdown 渲染，支持标题、段落、列表、引用、分隔线、行内代码、代码块、强调和安全链接。
+- [x] 浏览器隔离验收通过；全量测试 136/136、Clippy、rustfmt、Node 语法、嵌入资源回归和 diff 检查通过；release 已重新安装。

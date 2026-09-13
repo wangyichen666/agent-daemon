@@ -29,6 +29,7 @@
     activeView: "agent",
     collapsedDays: new Set(),
     permissionMode: null,
+    transcriptRenderPending: false,
   };
 
   class RpcSocket {
@@ -449,8 +450,17 @@
     renderTranscript($("#agent-transcript"), state.agentSnapshot?.messages || [], true);
   }
 
+  function scheduleAgentTranscriptRender() {
+    if (state.transcriptRenderPending) return;
+    state.transcriptRenderPending = true;
+    requestAnimationFrame(() => {
+      state.transcriptRenderPending = false;
+      renderAgentTranscript();
+    });
+  }
+
   function renderTranscript(node, messages, agentMode) {
-    const html = messages.map(renderMessage).join("");
+    const html = messages.map((message) => renderMessage(message, agentMode)).join("");
     node.innerHTML = html || (agentMode ? agentEmptyTemplate() : `
       <div class="empty-state">
         <span class="empty-orbit">⌁</span>
@@ -478,12 +488,160 @@
     const role = message.role || "system";
     const label = { user: "You", assistant: "Agent", tool: `Tool · ${message.name || "result"}`, system: "System" }[role] || role;
     const toolCalls = (message.tool_calls || []).map((call) => `
-      <div class="tool-call-pill">${escapeHtml(call.name)}(${escapeHtml(JSON.stringify(call.arguments))})</div>`).join("");
+      <div class="tool-call-pill"><strong>${escapeHtml(call.name)}</strong><code>${escapeHtml(JSON.stringify(call.arguments))}</code></div>`).join("");
+    const toolDetails = toolCalls ? `<details class="tool-details">
+      <summary>工具调用 · ${message.tool_calls.length} 项（默认折叠）</summary>
+      <div class="tool-call-list">${toolCalls}</div>
+    </details>` : "";
+    if (role === "tool") {
+      return `<details class="message tool tool-details">
+        <summary><span>${escapeHtml(label)}</span><small>输出已折叠，点击查看</small></summary>
+        <div class="message-content tool-output">${escapeHtml(message.content || "无输出")}</div>
+      </details>`;
+    }
+    const content = message.content == null ? "" : String(message.content);
+    const renderedContent = content
+      ? role === "assistant" ? renderMarkdown(content) : escapeHtml(content)
+      : "";
+    const streamingCursor = role === "assistant" && message === state.draftAssistant && state.activeRequest
+      ? `<span class="streaming-cursor" aria-label="正在生成"></span>`
+      : "";
+    const contentHtml = renderedContent || streamingCursor
+      ? `<div class="message-content">${renderedContent}${streamingCursor}</div>`
+      : "";
     return `<article class="message ${escapeAttr(role)}">
       <div class="message-label"><span>${escapeHtml(label)}</span></div>
-      ${message.content ? `<div class="message-content">${escapeHtml(message.content)}</div>` : ""}
-      ${toolCalls ? `<div class="tool-call-list">${toolCalls}</div>` : ""}
+      ${contentHtml}
+      ${toolDetails}
     </article>`;
+  }
+
+  function renderMarkdown(value) {
+    const lines = String(value ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const blocks = [];
+    let paragraph = [];
+    let listType = null;
+    let quoteLines = [];
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      blocks.push(`<p>${renderInlineMarkdown(paragraph.join("\n")).replace(/\n/g, "<br />")}</p>`);
+      paragraph = [];
+    };
+    const flushList = () => {
+      if (!listType) return;
+      blocks.push(`</${listType}>`);
+      listType = null;
+    };
+    const flushQuote = () => {
+      if (!quoteLines.length) return;
+      blocks.push(`<blockquote>${quoteLines.map(renderInlineMarkdown).join("<br />")}</blockquote>`);
+      quoteLines = [];
+    };
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const fence = line.match(/^ {0,3}(```+|~~~+)\s*([^ ]*)\s*$/);
+      if (fence) {
+        flushParagraph(); flushList(); flushQuote();
+        const marker = fence[1][0];
+        const code = [];
+        index += 1;
+        while (index < lines.length && !new RegExp(`^ {0,3}${marker}{3,}\\s*$`).test(lines[index])) {
+          code.push(lines[index]);
+          index += 1;
+        }
+        const language = fence[2] ? ` class="language-${escapeAttr(fence[2])}"` : "";
+        blocks.push(`<pre><code${language}>${escapeHtml(code.join("\n"))}</code></pre>`);
+        continue;
+      }
+      const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+      if (heading) {
+        flushParagraph(); flushList(); flushQuote();
+        const level = heading[1].length;
+        blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+        continue;
+      }
+      if (/^\s{0,3}((\*\s*){3,}|(-\s*){3,}|(_\s*){3,})$/.test(line)) {
+        flushParagraph(); flushList(); flushQuote();
+        blocks.push("<hr />");
+        continue;
+      }
+      const unordered = line.match(/^ {0,3}[-*+]\s+(.+)$/);
+      const ordered = line.match(/^ {0,3}\d+[.)]\s+(.+)$/);
+      if (unordered || ordered) {
+        flushParagraph(); flushQuote();
+        const nextType = unordered ? "ul" : "ol";
+        if (listType && listType !== nextType) flushList();
+        if (!listType) {
+          listType = nextType;
+          blocks.push(`<${listType}>`);
+        }
+        blocks.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
+        continue;
+      }
+      if (/^\s*$/.test(line)) {
+        flushParagraph();
+        flushList();
+        flushQuote();
+        continue;
+      }
+      const quote = line.match(/^ {0,3}>\s?(.*)$/);
+      if (quote) {
+        flushParagraph(); flushList();
+        quoteLines.push(quote[1]);
+        continue;
+      }
+      flushQuote();
+      flushList();
+      paragraph.push(line);
+    }
+    flushParagraph();
+    flushList();
+    flushQuote();
+    return blocks.join("");
+  }
+
+  function renderInlineMarkdown(value) {
+    const source = String(value ?? "");
+    const tokenPattern = /(`[^`]+`|\[[^\]]+\]\([^\s)]+(?:\s+["'][^"']*["'])?\)|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_)/g;
+    let output = "";
+    let cursor = 0;
+    let match;
+    while ((match = tokenPattern.exec(source))) {
+      output += escapeHtml(source.slice(cursor, match.index));
+      const token = match[0];
+      if (token.startsWith("`") && token.endsWith("`")) {
+        output += `<code>${escapeHtml(token.slice(1, -1))}</code>`;
+      } else if (token.startsWith("[") && token.includes("](")) {
+        const link = token.match(/^\[([^\]]+)\]\(([^\s)]+)(?:\s+["']([^"']*)["'])?\)$/);
+        const href = link && safeMarkdownUrl(link[2]);
+        if (!link || !href) output += escapeHtml(token);
+        else {
+          const title = link[3] ? ` title="${escapeAttr(link[3])}"` : "";
+          const external = /^(?:https?:|mailto:)/i.test(href) ? ` target="_blank" rel="noreferrer"` : "";
+          output += `<a href="${escapeAttr(href)}"${title}${external}>${renderInlineMarkdown(link[1])}</a>`;
+        }
+      } else if (token.startsWith("**") || token.startsWith("__")) {
+        output += `<strong>${renderInlineMarkdown(token.slice(2, -2))}</strong>`;
+      } else if (token.startsWith("~~")) {
+        output += `<del>${renderInlineMarkdown(token.slice(2, -2))}</del>`;
+      } else {
+        output += `<em>${renderInlineMarkdown(token.slice(1, -1))}</em>`;
+      }
+      cursor = tokenPattern.lastIndex;
+    }
+    return output + escapeHtml(source.slice(cursor));
+  }
+
+  function safeMarkdownUrl(value) {
+    const href = String(value ?? "").trim();
+    if (!href || /^(?:javascript|data|vbscript):/i.test(href)) return null;
+    if (/^(?:#|\/|\.\.?\/)/.test(href)) return href;
+    try {
+      const protocol = new URL(href, window.location.href).protocol;
+      return ["http:", "https:", "mailto:"].includes(protocol) ? href : null;
+    } catch {
+      return null;
+    }
   }
 
   async function newAgentSession() {
@@ -596,7 +754,7 @@
     if (event === "text_delta") {
       state.draftAssistant ||= { role: "assistant", content: "" };
       state.draftAssistant.content += data.delta || "";
-      renderAgentTranscript();
+      scheduleAgentTranscriptRender();
       setAgentStatus("running", "生成响应");
     } else if (event === "tool_started") {
       addActivity("tool", `执行 ${data.name || "工具"}`, `第 ${data.round || "?"} 轮 · 正在运行`);
@@ -617,9 +775,19 @@
   }
 
   function renderActivities() {
-    $("#activity-list").innerHTML = state.activities.length
-      ? state.activities.map((item) => `<div class="activity-item ${escapeAttr(item.kind)}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join("")
-      : `<div class="activity-empty">发出任务后，这里会显示模型思考、工具执行和审批状态。</div>`;
+    const visible = state.activities.filter((item) => item.kind !== "tool");
+    const tools = state.activities.filter((item) => item.kind === "tool");
+    const toolDetails = tools.length ? `<details class="activity-tools">
+      <summary>工具动态 · ${tools.length} 项（默认折叠）</summary>
+      <div class="activity-tools-list">${tools.map(renderActivityItem).join("")}</div>
+    </details>` : "";
+    $("#activity-list").innerHTML = visible.length || toolDetails
+      ? `${visible.map(renderActivityItem).join("")}${toolDetails}`
+      : `<div class="activity-empty">发出任务后，这里会显示模型响应、审批状态和执行结果。</div>`;
+  }
+
+  function renderActivityItem(item) {
+    return `<div class="activity-item ${escapeAttr(item.kind)}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></div>`;
   }
 
   function setAgentStatus(mode, label) {
